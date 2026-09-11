@@ -7,7 +7,7 @@
 **Run Cognition's SWE-2 as a first class model inside [Hermes Agent](https://github.com/NousResearch/hermes-agent), powered by your own [Devin CLI](https://docs.devin.ai/cli).**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
+[![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 [![Plugin kind](https://img.shields.io/badge/Hermes%20plugin-model--provider-7c3aed?style=for-the-badge)](plugin.yaml)
 [![Backend](https://img.shields.io/badge/backend-devin%20acp-00b4d8?style=for-the-badge)](https://docs.devin.ai/cli/reference/commands#devin-acp)
 [![Protocol](https://img.shields.io/badge/wire-ACP%20%2F%20JSON--RPC-f72585?style=for-the-badge)](https://agentclientprotocol.com)
@@ -52,7 +52,7 @@ sequenceDiagram
         P->>D: authenticate (methodId from authMethods)
     end
     P->>D: session/new (cwd, mcpServers: [])
-    P->>D: session/set_model | set_config_option → swe-2
+    P->>D: session/set_model or set_config_option (optional)
     P->>D: session/prompt (transcript + tool schemas as text)
     D->>C: inference
     loop session/update
@@ -63,6 +63,8 @@ sequenceDiagram
 ```
 
 Hermes' tool loop is preserved. The CLI's own tools are never invoked because permission requests are cancelled and the file system bridge is confined to the working directory. `<tool_call>` blocks flow back to Hermes, which executes them and continues the loop. Hermes remains the agent, while SWE-2 provides the model intelligence.
+
+The selected model is applied through the documented `DEVIN_MODEL` setting, with ACP model selection as a secondary path.
 
 ## 📦 Install
 
@@ -123,6 +125,7 @@ hermes doctor                     # confirms the `devin` binary resolves
 | `HERMES_DEVIN_ACP_COMMAND` | `devin` | Override the CLI binary path |
 | `DEVIN_CLI_PATH` | Not set | Alternative binary path override |
 | `HERMES_DEVIN_ACP_ARGS` | `acp` | Override arguments with shell-style splitting, for example `acp --model swe-2` |
+| `DEVIN_MODEL` | set per request | Set automatically to the selected Hermes model unless `HERMES_DEVIN_ACP_ARGS` already contains `--model` |
 | `DEVIN_API_KEY` / `WINDSURF_API_KEY` | Not set | Credential handed to the child and offered through ACP `authenticate` |
 
 Model ids are Devin CLI short names such as `swe-2`, `swe`, `opus`, `sonnet`, `codex`, and `gemini`. They resolve on the server to the latest family member. Unlisted or policy disabled ids fall back to the session default with a warning in `agent.log`.

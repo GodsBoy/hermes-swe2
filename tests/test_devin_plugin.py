@@ -1,15 +1,18 @@
 """Offline unit tests for the Devin ACP model-provider plugin.
 
-These exercise the plugin's pure logic — no `devin` binary, no network. They
+These exercise the plugin's pure logic, no `devin` binary, no network. They
 need a hermes-agent checkout importable (the client module imports
 ``agent.*``/``tools.*`` helpers). Point at one with HERMES_REPO, or run from a
 checkout that already has hermes-agent on sys.path.
 """
 
 import importlib.util
+import io
+import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,6 +72,79 @@ def test_fetch_models_returns_none():
     assert get_provider_profile("devin").fetch_models() is None
 
 
+def test_authenticate_request_prefers_key_or_token_method():
+    client_mod = _load_client_module()
+    init_result = {
+        "authMethods": [
+            {"id": "oauth", "name": "OAuth"},
+            {"id": "api-key", "name": "API key"},
+        ]
+    }
+    assert client_mod._authenticate_request(init_result, "secret") == {"methodId": "api-key"}
+    assert client_mod._authenticate_request({"authMethods": []}, "secret") is None
+    assert client_mod._authenticate_request(init_result, "") is None
+
+
+def test_handle_server_message_answers_requests_and_collects_updates(tmp_path):
+    client_mod = _load_client_module()
+    client = client_mod.DevinACPClient(command="echo", args=["acp"], acp_cwd=str(tmp_path))
+    process = SimpleNamespace(stdin=io.StringIO())
+    text_parts, reasoning_parts = [], []
+
+    assert client._handle_server_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "session/request_permission", "params": {}},
+        process=process, cwd=str(tmp_path), text_parts=text_parts, reasoning_parts=reasoning_parts,
+    )
+    permission = json.loads(process.stdin.getvalue())
+    assert permission["result"]["outcome"]["outcome"] == "cancelled"
+
+    process.stdin = io.StringIO()
+    assert client._handle_server_message(
+        {
+            "jsonrpc": "2.0", "id": 2, "method": "fs/read_text_file",
+            "params": {"path": "/etc/passwd"},
+        },
+        process=process, cwd=str(tmp_path), text_parts=text_parts, reasoning_parts=reasoning_parts,
+    )
+    outside_error = json.loads(process.stdin.getvalue())
+    assert outside_error["error"]["code"] == -32602
+
+    process.stdin = io.StringIO()
+    assert client._handle_server_message(
+        {"jsonrpc": "2.0", "id": 3, "method": "unknown", "params": {}},
+        process=process, cwd=str(tmp_path), text_parts=text_parts, reasoning_parts=reasoning_parts,
+    )
+    unknown_error = json.loads(process.stdin.getvalue())
+    assert unknown_error["error"]["code"] == -32601
+
+    assert client._handle_server_message(
+        {
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"text": "hello"},
+            }},
+        },
+        process=process, cwd=str(tmp_path), text_parts=text_parts, reasoning_parts=reasoning_parts,
+    )
+    assert text_parts == ["hello"]
+    client.close()
+
+
+def test_build_subprocess_env_applies_model_and_native_credential(monkeypatch):
+    client_mod = _load_client_module()
+    monkeypatch.setenv("DEVIN_API_KEY", "devin-secret")
+    monkeypatch.delenv("WINDSURF_API_KEY", raising=False)
+    client = client_mod.DevinACPClient(command="echo", args=["acp"])
+    env = client._build_subprocess_env("swe-2")
+    assert env["DEVIN_MODEL"] == "swe-2"
+    assert env["WINDSURF_API_KEY"] == "devin-secret"
+
+    overridden = client_mod.DevinACPClient(command="echo", args=["acp", "--model", "opus"])
+    assert "DEVIN_MODEL" not in overridden._build_subprocess_env("swe-2")
+    client.close()
+    overridden.close()
+
+
 def test_prompt_includes_transcript_and_tool_bridge():
     client_mod = _load_client_module()
     prompt = client_mod._format_messages_as_prompt(
@@ -111,6 +187,7 @@ def test_model_selection_falls_back_to_set_model():
     assert params["modelId"] == "swe-2"
     # unadvertised model -> None (use session default)
     assert client_mod._model_selection_request(session, "gpt-5") is None
+    assert client_mod._model_selection_request({"sessionId": "s1"}, "swe-2") is None
 
 
 def test_cwd_confinement():
@@ -128,3 +205,23 @@ def test_client_shape():
     assert callable(client.chat.completions.create)
     client.close()
     assert client.is_closed is True
+
+
+def test_fake_acp_server_end_to_end(monkeypatch):
+    client_mod = _load_client_module()
+    monkeypatch.delenv("DEVIN_MODEL", raising=False)
+    fake_server = Path(__file__).with_name("fake_acp_server.py")
+    client = client_mod.DevinACPClient(command=sys.executable, args=[str(fake_server)])
+    response = client.chat.completions.create(
+        model="swe-2", messages=[{"role": "user", "content": "hi"}],
+    )
+    assert response.choices[0].message.content == "Hello from fake ACP (swe-2)."
+    assert response.choices[0].message.reasoning == "Thinking about the request."
+    assert response.choices[0].finish_reason == "stop"
+
+    stream = client.chat.completions.create(
+        model="swe-2", messages=[{"role": "user", "content": "hi"}], stream=True,
+    )
+    assert stream
+    assert stream[0].choices[0].delta.content == "Hello from fake ACP (swe-2)."
+    assert stream[0].choices[0].finish_reason == "stop"

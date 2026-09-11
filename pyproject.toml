@@ -7,7 +7,7 @@ name = "hermes-swe2"
 version = "1.0.0"
 description = "Hermes Agent model-provider plugin: Cognition Devin CLI (SWE-2) via `devin acp`"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "GodsBoy" }]
 

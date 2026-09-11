@@ -57,12 +57,12 @@ _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant", "t
 _ACP_PROBE_CACHE: dict[str, bool] = {}
 # Env vars (priority order) that carry a Devin/Windsurf credential we hand to the
 # child and offer through ACP `authenticate` when the server asks for one.
-_DEVIN_KEY_ENV_VARS = ("DEVIN_API_KEY", "WINDSURF_API_KEY")
+_DEVIN_KEY_ENV_VARS = ("WINDSURF_API_KEY", "DEVIN_API_KEY")
 _PROMPT_PREAMBLE = (
     "You are being used as the active ACP agent backend for Hermes.",
     "Use ACP capabilities to complete tasks.",
     (
-        "Do not use your own built-in tools — permission requests are denied in this "
+        "Do not use your own built-in tools, permission requests are denied in this "
         "bridge. If a tool is needed, you MUST output it as a <tool_call>{...}</tool_call> "
         "block with JSON exactly in OpenAI function-call shape, and Hermes will execute it "
         "for you."
@@ -105,10 +105,12 @@ def _resolve_devin_key() -> str:
     return ""
 
 
-def _acp_supported(command: str) -> bool | None:
+def _acp_supported(command: str, args: list[str]) -> bool | None:
     """Tri-state probe: True = help advertises an ``acp`` subcommand; False = help ran
     cleanly without it (caller fast-fails); None = inconclusive (binary missing / help
     failed → normal spawn error)."""
+    if "acp" not in args:
+        return True
     if (cached := _ACP_PROBE_CACHE.get(command)) is not None:
         return cached
     try:
@@ -139,7 +141,7 @@ def _resolve_home_dir() -> str:
         return "/tmp"
 
 
-def _build_subprocess_env() -> dict[str, str]:
+def _build_subprocess_env(requested_model: str | None = None, args: list[str] | None = None) -> dict[str, str]:
     from hermes_constants import apply_subprocess_home_env
 
     # The ACP child drives a model and needs the user's Devin credential; the central
@@ -149,6 +151,11 @@ def _build_subprocess_env() -> dict[str, str]:
     for var in _DEVIN_KEY_ENV_VARS:
         if val := os.getenv(var, "").strip():
             env[var] = val
+    if (devin_key := os.getenv("DEVIN_API_KEY", "").strip()) and not os.getenv("WINDSURF_API_KEY", "").strip():
+        env["WINDSURF_API_KEY"] = devin_key
+    resolved_args = _resolve_args() if args is None else args
+    if requested_model and requested_model != "devin" and "--model" not in resolved_args:
+        env["DEVIN_MODEL"] = requested_model
     env["HOME"] = _resolve_home_dir()
     apply_subprocess_home_env(env)
     return env
@@ -196,6 +203,8 @@ def _model_selection_request(session: dict[str, Any], requested_model: str) -> t
             "value": requested_model,
         }
     available = _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
+    if not available:
+        return None
     return None if available and requested_model not in available else (
         "session/set_model", {"sessionId": session_id, "modelId": requested_model})
 
@@ -341,24 +350,36 @@ class DevinACPClient:
         tool_choice: Any = None, stream: bool = False, **_: Any,
     ) -> Any:
         prompt_text = _format_messages_as_prompt(messages or [], model=model, tools=tools, tool_choice=tool_choice)
-        response_text, reasoning = self._run_prompt(prompt_text, timeout_seconds=_effective_timeout(timeout), model=model)
+        response_text, reasoning, stop_reason = self._run_prompt(
+            prompt_text, timeout_seconds=_effective_timeout(timeout), model=model
+        )
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
+        if stop_reason in ("refusal", "cancelled") and not cleaned_text:
+            raise RuntimeError(
+                f"Devin ACP ended the turn with stopReason={stop_reason!r} and no content."
+            )
         message = SimpleNamespace(
             content=cleaned_text, tool_calls=tool_calls, reasoning=reasoning or None,
             reasoning_content=reasoning or None, reasoning_details=None,
         )
         completion = SimpleNamespace(
-            choices=[SimpleNamespace(message=message, finish_reason="tool_calls" if tool_calls else "stop")],
+            choices=[SimpleNamespace(
+                message=message,
+                finish_reason="tool_calls" if tool_calls else ("length" if stop_reason == "max_tokens" else "stop"),
+            )],
             usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0,
                                   prompt_tokens_details=SimpleNamespace(cached_tokens=0)),
             model=model or "devin",
         )
         return _completion_to_stream_chunks(completion) if stream else completion
 
-    def _spawn(self) -> subprocess.Popen[str]:
+    def _build_subprocess_env(self, requested_model: str | None = None) -> dict[str, str]:
+        return _build_subprocess_env(requested_model, self._acp_args)
+
+    def _spawn(self, requested_model: str | None = None) -> subprocess.Popen[str]:
         # Fast-fail when the CLI has no acp subcommand (else the parent waits the full
         # child timeout for stdout that never arrives).
-        if _acp_supported(self._acp_command) is False:
+        if _acp_supported(self._acp_command, self._acp_args) is False:
             raise RuntimeError(_INSTALL_ERROR % self._acp_command + "the `--help` output does not list an `acp` subcommand.")
         try:
             from hermes_cli._subprocess_compat import (
@@ -368,7 +389,7 @@ class DevinACPClient:
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
-                cwd=self._acp_cwd, env=_build_subprocess_env(), creationflags=windows_hide_flags(),
+                cwd=self._acp_cwd, env=self._build_subprocess_env(requested_model), creationflags=windows_hide_flags(),
             )
         except FileNotFoundError as exc:
             raise RuntimeError(_INSTALL_ERROR % self._acp_command + str(exc)) from exc
@@ -380,9 +401,11 @@ class DevinACPClient:
             self._active_process = proc
         return proc
 
-    def _run_prompt(self, prompt_text: str, *, timeout_seconds: float, model: str | None = None) -> tuple[str, str]:
+    def _run_prompt(
+        self, prompt_text: str, *, timeout_seconds: float, model: str | None = None
+    ) -> tuple[str, str, str]:
         requested_model = str(model or "").strip()
-        proc = self._spawn()
+        proc = self._spawn(requested_model)
         inbox: queue.Queue[dict[str, Any]] = queue.Queue()
         stderr_tail: deque[str] = deque(maxlen=40)
 
@@ -439,6 +462,14 @@ class DevinACPClient:
                 try:
                     if (selection := _model_selection_request(session, requested_model)) is not None:
                         _request(*selection)
+                    elif not any(
+                        isinstance(option, dict) and "model" in (option.get("category"), option.get("id"))
+                        for option in (session.get("configOptions") or [])
+                    ) and not (session.get("models") or {}).get("availableModels"):
+                        logger.debug(
+                            "Devin ACP did not advertise model options; DEVIN_MODEL=%r was applied.",
+                            requested_model,
+                        )
                     else:
                         logger.warning("Devin ACP does not offer model %r; using the session default.", requested_model)
                 except Exception as exc:
@@ -446,8 +477,12 @@ class DevinACPClient:
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
             prompt = {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]}
-            _request("session/prompt", prompt, text_parts=text_parts, reasoning_parts=reasoning_parts)
-            return "".join(text_parts), "".join(reasoning_parts)
+            prompt_result = _request("session/prompt", prompt, text_parts=text_parts, reasoning_parts=reasoning_parts) or {}
+            return (
+                "".join(text_parts),
+                "".join(reasoning_parts),
+                str(prompt_result.get("stopReason") or ""),
+            )
         finally:
             self.close()
 
