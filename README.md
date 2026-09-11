@@ -102,11 +102,10 @@ pip install git+https://github.com/GodsBoy/hermes-swe2.git
 
 ### Prerequisites
 
-```bash
-# Devin CLI
-curl -fsSL https://cli.devin.ai/install.sh | bash
+Install the Devin CLI by following the [official installation guide](https://docs.devin.ai/cli), then authenticate once:
 
-# authenticate once (or export WINDSURF_API_KEY / DEVIN_API_KEY)
+```bash
+# or export WINDSURF_API_KEY
 devin auth login
 ```
 

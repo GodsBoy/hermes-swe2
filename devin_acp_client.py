@@ -76,8 +76,7 @@ _INITIALIZE_PARAMS = {
 }
 _INSTALL_ERROR = (
     "Hermes could not start the Devin CLI ACP server ('%s').\n\n"
-    "Install Devin CLI:\n  curl -fsSL https://cli.devin.ai/install.sh | bash\n"
-    "  # then verify with: devin --help\n\n"
+    "Install Devin CLI by following https://docs.devin.ai/cli and verify with: devin --help\n\n"
     "Authenticate it with your own Devin account (`devin auth login`) or export "
     "WINDSURF_API_KEY / DEVIN_API_KEY.\n\n"
     "If `devin` already resolves but you still see this, point Hermes at it explicitly:\n"

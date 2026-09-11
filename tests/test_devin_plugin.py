@@ -102,7 +102,7 @@ def test_handle_server_message_answers_requests_and_collects_updates(tmp_path):
     assert client._handle_server_message(
         {
             "jsonrpc": "2.0", "id": 2, "method": "fs/read_text_file",
-            "params": {"path": "/etc/passwd"},
+            "params": {"path": "/outside/project/secret.txt"},
         },
         process=process, cwd=str(tmp_path), text_parts=text_parts, reasoning_parts=reasoning_parts,
     )
@@ -193,7 +193,7 @@ def test_model_selection_falls_back_to_set_model():
 def test_cwd_confinement():
     client_mod = _load_client_module()
     with pytest.raises(PermissionError):
-        client_mod._ensure_path_within_cwd("/etc/passwd", "/home/user/project")
+        client_mod._ensure_path_within_cwd("/outside/project/secret.txt", "/home/user/project")
     ok = client_mod._ensure_path_within_cwd("/home/user/project/a.py", "/home/user/project")
     assert ok.name == "a.py"
 
