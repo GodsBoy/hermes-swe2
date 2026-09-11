@@ -62,7 +62,7 @@ _PROMPT_PREAMBLE = (
     "You are being used as the active ACP agent backend for Hermes.",
     "Use ACP capabilities to complete tasks.",
     (
-        "Do not use your own built-in tools, permission requests are denied in this "
+        "Do not use your own built-in tools; permission requests are denied in this "
         "bridge. If a tool is needed, you MUST output it as a <tool_call>{...}</tool_call> "
         "block with JSON exactly in OpenAI function-call shape, and Hermes will execute it "
         "for you."
@@ -203,10 +203,9 @@ def _model_selection_request(session: dict[str, Any], requested_model: str) -> t
             "value": requested_model,
         }
     available = _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
-    if not available:
+    if not available or requested_model not in available:
         return None
-    return None if available and requested_model not in available else (
-        "session/set_model", {"sessionId": session_id, "modelId": requested_model})
+    return "session/set_model", {"sessionId": session_id, "modelId": requested_model}
 
 
 def _authenticate_request(init_result: dict[str, Any], api_key: str) -> dict[str, Any] | None:
