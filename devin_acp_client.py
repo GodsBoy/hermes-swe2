@@ -33,10 +33,18 @@ from typing import Any
 
 from agent.acp_openai_bridge import (
     completion_to_stream_chunks as _completion_to_stream_chunks,
+)
+from agent.acp_openai_bridge import (
     extract_tool_calls_from_text as _extract_tool_calls_from_text,
+)
+from agent.acp_openai_bridge import (
     render_tool_bridge_sections as _render_tool_bridge_sections,
 )
-from agent.file_safety import get_read_block_error, get_write_denied_error, is_write_approval_required
+from agent.file_safety import (
+    get_read_block_error,
+    get_write_denied_error,
+    is_write_approval_required,
+)
 from agent.redact import redact_sensitive_text
 from tools.environments.local import hermes_subprocess_env
 
@@ -53,9 +61,12 @@ _DEVIN_KEY_ENV_VARS = ("DEVIN_API_KEY", "WINDSURF_API_KEY")
 _PROMPT_PREAMBLE = (
     "You are being used as the active ACP agent backend for Hermes.",
     "Use ACP capabilities to complete tasks.",
-    "Do not use your own built-in tools — permission requests are denied in this bridge. "
-    "If a tool is needed, you MUST output it as a <tool_call>{...}</tool_call> block with "
-    "JSON exactly in OpenAI function-call shape, and Hermes will execute it for you.",
+    (
+        "Do not use your own built-in tools — permission requests are denied in this "
+        "bridge. If a tool is needed, you MUST output it as a <tool_call>{...}</tool_call> "
+        "block with JSON exactly in OpenAI function-call shape, and Hermes will execute it "
+        "for you."
+    ),
     "If no tool is needed, answer normally.",
 )
 _INITIALIZE_PARAMS = {
@@ -103,7 +114,7 @@ def _acp_supported(command: str) -> bool | None:
     try:
         probe = subprocess.run(
             [command, "--help"], capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=5, stdin=subprocess.DEVNULL,
+            errors="replace", timeout=5, stdin=subprocess.DEVNULL, check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
@@ -350,7 +361,9 @@ class DevinACPClient:
         if _acp_supported(self._acp_command) is False:
             raise RuntimeError(_INSTALL_ERROR % self._acp_command + "the `--help` output does not list an `acp` subcommand.")
         try:
-            from hermes_cli._subprocess_compat import windows_hide_flags  # hide the Windows console flash; pipes intact for the ACP wire
+            from hermes_cli._subprocess_compat import (
+                windows_hide_flags,  # hide the Windows console flash; pipes intact for the ACP wire
+            )
 
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -15,3 +15,9 @@ devin = "devin_provider:register"
 
 [tool.setuptools]
 py-modules = ["devin_provider", "devin_acp_client"]
+
+[tool.ruff]
+# Mirrors the upstream hermes-agent style: broad exception guards are
+# intentional at plugin boundaries (a plugin must never take the agent down),
+# and the repo directory name is a git slug, not an importable module name.
+lint.ignore = ["BLE001", "N999"]
