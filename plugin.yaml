@@ -1,5 +1,5 @@
 name: devin
 kind: model-provider
 version: 1.0.0
-description: Cognition Devin CLI — SWE-2 via `devin acp` (ACP stdio subprocess)
+description: SWE-2 through the Devin CLI ACP stdio subprocess
 author: GodsBoy

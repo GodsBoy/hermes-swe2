@@ -9,6 +9,7 @@ description = "Hermes Agent model-provider plugin: Cognition Devin CLI (SWE-2) v
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "GodsBoy" }]
 
 [project.entry-points."hermes_agent.plugins"]
 devin = "devin_provider:register"

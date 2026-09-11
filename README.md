@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="assets/banner.png" alt="hermes-swe2 — SWE-2 inside Hermes Agent via Devin CLI ACP" width="100%">
+<img src="assets/banner.png" alt="hermes-swe2: SWE-2 inside Hermes Agent through Devin CLI ACP" width="100%">
 
 # ⚡ hermes-swe2
 
-**Run Cognition's SWE-2 as a first-class model inside [Hermes Agent](https://github.com/NousResearch/hermes-agent) — powered by your own [Devin CLI](https://docs.devin.ai/cli).**
+**Run Cognition's SWE-2 as a first class model inside [Hermes Agent](https://github.com/NousResearch/hermes-agent), powered by your own [Devin CLI](https://docs.devin.ai/cli).**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
@@ -19,22 +19,22 @@
 
 ## 🧠 What is this?
 
-Cognition's **SWE-2** is one of the strongest software-engineering models available — but it has **no public inference API**. What Cognition *does* ship is `devin acp`: a documented **Agent Client Protocol** server built so third-party editors (Zed, Windsurf, …) can drive Devin as a subprocess.
+Cognition's **SWE-2** is one of the strongest software engineering models available, but it has **no public inference API**. Cognition provides `devin acp`, a documented **Agent Client Protocol** server that lets third party editors such as Zed and Windsurf drive the CLI as a subprocess.
 
-**hermes-swe2 turns that editor surface into a Hermes model provider.** Hermes talks ACP to your locally installed `devin` binary — the same wire Zed uses — and SWE-2 becomes a selectable model in `hermes model`, `hermes --provider`, the TUI, and the gateway. Same seam as the bundled `copilot-acp` provider, zero core edits.
+**hermes-swe2 turns that editor surface into a Hermes model provider.** Hermes talks ACP to your locally installed `devin` binary, the same protocol used by Zed, and SWE-2 becomes a selectable model in `hermes model`, `hermes --provider`, the TUI, and the gateway. It uses the same extension seam as the bundled `copilot-acp` provider and requires no core edits.
 
 > [!IMPORTANT]
-> **Bring your own Devin subscription.** The plugin never stores, proxies, or shares credentials — `devin auth login` (or `WINDSURF_API_KEY` / `DEVIN_API_KEY`) stays on your machine.
+> **Bring your own subscription.** The plugin never stores, proxies, or shares credentials. Run `devin auth login`, or set `WINDSURF_API_KEY` or `DEVIN_API_KEY`, on your machine.
 
 ## ✨ Features
 
-- 🔌 **Drop-in provider** — registers as `devin`; `--provider devin`, `hermes model`, `hermes setup`, and `hermes doctor` pick it up automatically
-- 🧬 **SWE family picker** — `swe-2`, `swe`, `swe-1-7`, `swe-1-7-lightning`, `swe-1-6-fast` as fallbacks; live `availableModels`/`configOptions` negotiated over ACP when offered
-- 🛠️ **Full tool calling** — Hermes tool schemas cross the bridge as `<tool_call>` blocks; Hermes keeps executing tools itself
-- 🌊 **Streaming** — `session/update` chunks map back to OpenAI stream chunks
-- 🔒 **Fail-closed** — permission prompts denied, `fs/*` requests confined to the session cwd
-- ⚙️ **Zero-config override hooks** — custom binary/argv via env vars
-- 📦 **Three install paths** — `hermes plugins install`, manual drop-in, or pip entry point
+* 🔌 **Drop in provider:** registers as `devin`; `--provider devin`, `hermes model`, `hermes setup`, and `hermes doctor` pick it up automatically
+* 🧬 **SWE family picker:** `swe-2`, `swe`, `swe-1-7`, `swe-1-7-lightning`, and `swe-1-6-fast` are available as fallbacks. Live `availableModels` and `configOptions` are negotiated over ACP when offered
+* 🛠️ **Full tool calling:** Hermes tool schemas cross the bridge as `<tool_call>` blocks, while Hermes continues to execute the tools
+* 🌊 **Streaming:** `session/update` chunks map back to OpenAI stream chunks
+* 🔒 **Fail closed:** permission prompts are denied, and `fs/*` requests are confined to the session working directory
+* ⚙️ **Zero configuration overrides:** customize the binary and arguments through environment variables
+* 📦 **Three installation paths:** `hermes plugins install`, manual drop in, or pip entry point
 
 ## 🏗️ How it works
 
@@ -42,7 +42,7 @@ Cognition's **SWE-2** is one of the strongest software-engineering models availa
 sequenceDiagram
     participant H as 🪽 Hermes Agent
     participant P as hermes-swe2 shim
-    participant D as devin acp
+    participant D as Devin ACP
     participant C as ☁️ Cognition (SWE-2)
 
     H->>P: chat.completions.create(model="swe-2")
@@ -62,7 +62,7 @@ sequenceDiagram
     P-->>H: OpenAI-shaped completion (content + <tool_call>s + stream chunks)
 ```
 
-Hermes' tool loop is preserved: Devin's *own* tools are never invoked (permission requests are cancelled, fs bridge is cwd-scoped), so `<tool_call>` blocks flow back to Hermes, which executes them and loops — Hermes stays the agent, SWE-2 stays the brain.
+Hermes' tool loop is preserved. The CLI's own tools are never invoked because permission requests are cancelled and the file system bridge is confined to the working directory. `<tool_call>` blocks flow back to Hermes, which executes them and continues the loop. Hermes remains the agent, while SWE-2 provides the model intelligence.
 
 ## 📦 Install
 
@@ -71,8 +71,8 @@ Hermes' tool loop is preserved: Devin's *own* tools are never invoked (permissio
 
 ```bash
 hermes plugins install https://github.com/GodsBoy/hermes-swe2
-# lands in $HERMES_HOME/plugins/hermes-swe2/ — kind: model-provider routes it
-# to the provider registry automatically
+# lands in $HERMES_HOME/plugins/hermes-swe2/
+# the model provider manifest routes it to the provider registry automatically
 ```
 
 </details>
@@ -121,18 +121,18 @@ hermes doctor                     # confirms the `devin` binary resolves
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `HERMES_DEVIN_ACP_COMMAND` | `devin` | Override the CLI binary path |
-| `DEVIN_CLI_PATH` | — | Alternative binary-path override |
-| `HERMES_DEVIN_ACP_ARGS` | `acp` | Override argv (shlex-split) — e.g. `acp --model swe-2` |
-| `DEVIN_API_KEY` / `WINDSURF_API_KEY` | — | Credential handed to the child + offered via ACP `authenticate` |
+| `DEVIN_CLI_PATH` | Not set | Alternative binary path override |
+| `HERMES_DEVIN_ACP_ARGS` | `acp` | Override arguments with shell-style splitting, for example `acp --model swe-2` |
+| `DEVIN_API_KEY` / `WINDSURF_API_KEY` | Not set | Credential handed to the child and offered through ACP `authenticate` |
 
-Model ids are Devin CLI short names (`swe-2`, `swe`, `opus`, `sonnet`, `codex`, `gemini`, …); they resolve server-side to the latest family member. Unlisted or policy-disabled ids fall back to the session default with a warning in `agent.log`.
+Model ids are Devin CLI short names such as `swe-2`, `swe`, `opus`, `sonnet`, `codex`, and `gemini`. They resolve on the server to the latest family member. Unlisted or policy disabled ids fall back to the session default with a warning in `agent.log`.
 
 ## 🔍 Troubleshooting
 
 <details>
 <summary><b>"Could not find the 'devin' CLI command"</b></summary>
 
-`devin` isn't on `PATH` for the Hermes process. Install it, or point at it:
+The `devin` command is not on `PATH` for the Hermes process. Install it, or point at it:
 
 ```bash
 export HERMES_DEVIN_ACP_COMMAND=/full/path/to/devin
@@ -143,25 +143,25 @@ export HERMES_DEVIN_ACP_COMMAND=/full/path/to/devin
 <details>
 <summary><b>Model silently stays on the session default</b></summary>
 
-The ACP session advertised a model list that didn't include your pick (e.g. an enterprise allowlist filtered SWE-2 out). Check `~/.hermes/logs/agent.log` for the `does not offer model` warning.
+The ACP session advertised a model list that did not include your selected model. For example, an enterprise allowlist may filter SWE-2 out. Check `~/.hermes/logs/agent.log` for the `does not offer model` warning.
 
 </details>
 
 <details>
 <summary><b>Auth errors / devin asks to log in</b></summary>
 
-Run `devin auth login` in a terminal first, or export `WINDSURF_API_KEY`. Remote/SSH boxes: `devin setup --force-manual-token-flow`.
+Run `devin auth login` in a terminal first, or export `WINDSURF_API_KEY`. On a remote or SSH machine, run `devin setup --force-manual-token-flow`.
 
 </details>
 
 ## ⚖️ Terms-of-use notes
 
-This plugin deliberately uses the **documented** `devin acp` interface — the same one Cognition built for third-party editors. No reverse engineering, no private endpoints, no credential extraction.
+This plugin deliberately uses the **documented** `devin acp` interface, the same interface Cognition built for third party editors. There is no reverse engineering, no use of private endpoints, and no credential extraction.
 
-- ✅ Each user authenticates their own Devin CLI — no credential sharing
-- ❌ Don't use SWE-2 output to build/train a competing model or product (Cognition Platform Terms §2.3)
-- ❌ Don't publicly publish benchmarks of the service (Enterprise MSA §2.3(v))
-- ℹ️ Enterprise model allowlists / team settings still apply inside Devin CLI
+* ✅ Each user authenticates their own CLI. Credentials are not shared
+* ❌ Do not use SWE-2 output to build or train a competing model or product. See Cognition Platform Terms §2.3
+* ❌ Do not publicly publish service benchmarks. See Enterprise MSA §2.3(v)
+* ℹ️ Enterprise model allowlists and team settings still apply inside the CLI
 
 ## 🧪 Tests
 
@@ -171,13 +171,13 @@ HERMES_REPO=/path/to/hermes-agent \
   python -m pytest tests/ -q
 ```
 
-Fully offline — covers registration, the prompt/tool bridge, ACP model-selection logic, and cwd confinement. No `devin` binary required.
+The tests run fully offline. They cover registration, the prompt and tool bridge, ACP model selection logic, and working directory confinement. No `devin` binary is required.
 
 ## 🗂️ Repo layout
 
 ```
 ├── plugin.yaml          # kind: model-provider manifest
-├── __init__.py          # directory-plugin entry → devin_provider.register()
+├── __init__.py          # directory plugin entry that calls devin_provider.register()
 ├── devin_provider.py    # DevinACPProfile + register() (pip entry point target)
 ├── devin_acp_client.py  # self-contained ACP stdio client (OpenAI-shape shim)
 ├── pyproject.toml       # optional pip install
@@ -188,13 +188,13 @@ Fully offline — covers registration, the prompt/tool bridge, ACP model-selecti
 ## 👤 Credits
 
 Built by **[GodsBoy](https://github.com/GodsBoy)**. If you use or adapt this plugin,
-attribution is appreciated — a link back to this repo is plenty.
+attribution is appreciated. A link back to this repository is enough.
 
 ## 🤝 Contributing
 
-Issues and PRs welcome. Hermes-side conventions live in
-[`plugins/AGENTS.md`](https://github.com/NousResearch/hermes-agent/blob/main/plugins/AGENTS.md) —
-this is intentionally an **out-of-tree** plugin (their policy for vendor integrations).
+Issues and pull requests are welcome. Hermes conventions live in
+[`plugins/AGENTS.md`](https://github.com/NousResearch/hermes-agent/blob/main/plugins/AGENTS.md).
+This is intentionally an **out of tree** plugin, following the project's policy for vendor integrations.
 
 ---
 
