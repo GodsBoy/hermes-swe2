@@ -11,6 +11,7 @@ def send(message):
 
 
 session_id = "fake-session"
+selected_model = None
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -29,10 +30,30 @@ for line in sys.stdin:
             "id": request_id,
             "result": {
                 "sessionId": session_id,
-                "models": {"availableModels": [{"modelId": "swe-2-max"}]},
+                "configOptions": [{
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "swe-2-max",
+                    "options": [
+                        {"value": "swe-2-medium", "name": "SWE-2 Medium"},
+                        {"value": "swe-2-high", "name": "SWE-2 High"},
+                        {"value": "swe-2-max", "name": "SWE-2 Max"},
+                        {"value": "swe-1-7", "name": "SWE-1.7 Max"},
+                        {"value": "swe-1-7-medium", "name": "SWE-1.7 Medium"},
+                        {"value": "gpt-5.6-sol-none", "name": "GPT-5.6 Sol No Thinking"},
+                        {"value": "gpt-5.6-sol-max", "name": "GPT-5.6 Sol Max Thinking"},
+                    ],
+                }],
             },
         })
+    elif method == "session/set_config_option":
+        params = request.get("params") or {}
+        if params.get("configId") == "model":
+            selected_model = params.get("value")
+        send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     elif method == "session/set_model":
+        selected_model = (request.get("params") or {}).get("modelId")
         send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     elif method == "session/prompt":
         send({
@@ -66,7 +87,7 @@ for line in sys.stdin:
                     "sessionUpdate": "agent_message_chunk",
                     "content": {
                         "type": "text",
-                        "text": f"{os.environ.get('DEVIN_MODEL', '')}).",
+                        "text": f"{selected_model or os.environ.get('DEVIN_MODEL', '')}).",
                     },
                 },
             },

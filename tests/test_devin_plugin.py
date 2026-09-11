@@ -292,6 +292,59 @@ def test_prompt_token_budget_env_override(monkeypatch):
     assert client_mod._prompt_token_budget() == client_mod._DEFAULT_PROMPT_TOKEN_BUDGET
 
 
+def test_profile_forwards_reasoning_config_to_client():
+    provider_mod = _load_provider_module()
+    profile = provider_mod.DevinACPProfile(name="devin")
+    extra_body, top_level = profile.build_api_kwargs_extras(reasoning_config={"effort": "high"})
+    assert extra_body == {}
+    assert top_level == {"reasoning_config": {"effort": "high"}}
+    assert profile.build_api_kwargs_extras(reasoning_config=None) == ({}, {})
+    assert profile.build_api_kwargs_extras() == ({}, {})
+
+
+def test_effort_variant_maps_reasoning_onto_devin_tiers():
+    client_mod = _load_client_module()
+    advertised = {
+        "swe-2-medium", "swe-2-high", "swe-2-max",
+        "swe-1-7", "swe-1-7-medium",
+        "gpt-5.6-sol-none", "gpt-5.6-sol-low", "gpt-5.6-sol-max",
+        "gpt-6-astra-low", "gpt-6-astra-max",
+        "claude-opus-5-low", "claude-opus-5-max", "claude-opus-5-max-fast",
+    }
+    # exact tier
+    assert client_mod._effort_variant("swe-2", "high", advertised) == "swe-2-high"
+    assert client_mod._effort_variant("swe-2-max", "medium", advertised) == "swe-2-medium"
+    # aliases resolve to their family
+    assert client_mod._effort_variant("swe", "high", advertised) == "swe-2-high"
+    assert client_mod._effort_variant("opus", "low", advertised) == "claude-opus-5-low"
+    # never escalates: xhigh on a medium/high/max family lands on high
+    assert client_mod._effort_variant("swe-2", "xhigh", advertised) == "swe-2-high"
+    assert client_mod._effort_variant("swe-2", "max", advertised) == "swe-2-max"
+    # below the family's floor picks the lowest advertised tier
+    assert client_mod._effort_variant("swe-2", "none", advertised) == "swe-2-medium"
+    # bare family id counts as the top tier
+    assert client_mod._effort_variant("swe-1-7", "max", advertised) == "swe-1-7"
+    assert client_mod._effort_variant("swe-1-7", "medium", advertised) == "swe-1-7-medium"
+    # real "-none" tier where the family has one
+    assert client_mod._effort_variant("gpt-5.6-sol", "none", advertised) == "gpt-5.6-sol-none"
+    # alias maps to its catalog family (gpt -> gpt-6-astra)
+    assert client_mod._effort_variant("gpt", "low", advertised) == "gpt-6-astra-low"
+    # unmappable input stays out of the way
+    assert client_mod._effort_variant("swe-2", "bogus", advertised) is None
+    assert client_mod._effort_variant("unknown-model", "high", advertised) is None
+    assert client_mod._effort_variant("swe-2", "high", set()) is None
+
+
+def test_family_base_strips_effort_and_decorator_suffixes():
+    client_mod = _load_client_module()
+    assert client_mod._family_base("swe-2-max") == "swe-2"
+    assert client_mod._family_base("swe-2") == "swe-2"
+    assert client_mod._family_base("swe-1-7") == "swe-1-7"
+    assert client_mod._family_base("swe-1-7-lightning") == "swe-1-7-lightning"
+    assert client_mod._family_base("gpt-5.6-sol-low-priority") == "gpt-5.6-sol"
+    assert client_mod._family_base("claude-opus-5-max-fast") == "claude-opus-5"
+
+
 def test_model_selection_prefers_config_options():
     client_mod = _load_client_module()
     session = {
@@ -341,16 +394,88 @@ def test_fake_acp_server_end_to_end(monkeypatch):
     monkeypatch.delenv("DEVIN_MODEL", raising=False)
     fake_server = Path(__file__).with_name("fake_acp_server.py")
     client = client_mod.DevinACPClient(command=sys.executable, args=[str(fake_server)])
-    response = client.chat.completions.create(
-        model="swe-2-max", messages=[{"role": "user", "content": "hi"}],
-    )
-    assert response.choices[0].message.content == "Hello from fake ACP (swe-2-max)."
-    assert response.choices[0].message.reasoning == "Thinking about the request."
-    assert response.choices[0].finish_reason == "stop"
+    try:
+        response = client.chat.completions.create(
+            model="swe-2-max", messages=[{"role": "user", "content": "hi"}],
+        )
+        assert response.choices[0].message.content == "Hello from fake ACP (swe-2-max)."
+        assert response.choices[0].message.reasoning == "Thinking about the request."
+        assert response.choices[0].finish_reason == "stop"
 
-    stream = client.chat.completions.create(
-        model="swe-2-max", messages=[{"role": "user", "content": "hi"}], stream=True,
-    )
-    assert stream
-    assert stream[0].choices[0].delta.content == "Hello from fake ACP (swe-2-max)."
-    assert stream[0].choices[0].finish_reason == "stop"
+        stream = client.chat.completions.create(
+            model="swe-2-max", messages=[{"role": "user", "content": "hi"},
+                                         {"role": "assistant", "content": "hello"}, {"role": "user", "content": "again"}],
+            stream=True,
+        )
+        assert stream
+        assert stream[0].choices[0].delta.content == "Hello from fake ACP (swe-2-max)."
+        assert stream[0].choices[0].finish_reason == "stop"
+    finally:
+        client.close()
+
+
+def test_kept_alive_session_sends_only_new_turns(monkeypatch):
+    client_mod = _load_client_module()
+    monkeypatch.delenv("DEVIN_MODEL", raising=False)
+    fake_server = Path(__file__).with_name("fake_acp_server.py")
+    client = client_mod.DevinACPClient(command=sys.executable, args=[str(fake_server)])
+    try:
+        first = client.chat.completions.create(
+            model="swe-2-max", messages=[{"role": "user", "content": "hi"}],
+        )
+        session_id = client._session_id
+        proc = client._live_process()
+        assert session_id and proc is not None
+
+        # Same session and process serve the follow-up; only the new turns go out.
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": first.choices[0].message.content},
+            {"role": "user", "content": "again"},
+        ]
+        second = client.chat.completions.create(model="swe-2-max", messages=history)
+        assert second.choices[0].message.content.startswith("Hello from fake ACP")
+        assert client._session_id == session_id
+        assert client._live_process() is proc
+        assert len(client._sent_hashes) == 3
+
+        # History rewritten by compression (prefix changed) -> fresh session + replay.
+        diverged = [{"role": "user", "content": "summary of earlier chat"}]
+        third = client.chat.completions.create(model="swe-2-max", messages=diverged)
+        assert third.choices[0].message.content.startswith("Hello from fake ACP")
+        assert client._session_id != session_id or client._live_process() is not proc
+        assert len(client._sent_hashes) == 1
+    finally:
+        client.close()
+
+
+def test_fake_acp_server_reasoning_effort_remaps_variant(monkeypatch):
+    client_mod = _load_client_module()
+    monkeypatch.delenv("DEVIN_MODEL", raising=False)
+    fake_server = Path(__file__).with_name("fake_acp_server.py")
+    client = client_mod.DevinACPClient(command=sys.executable, args=[str(fake_server)])
+    try:
+        response = client.chat.completions.create(
+            model="swe-2",
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_config={"effort": "high"},
+        )
+        assert response.choices[0].message.content == "Hello from fake ACP (swe-2-high)."
+
+        off = client.chat.completions.create(
+            model="swe-2",
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_config={"enabled": False},
+        )
+        assert off.choices[0].message.content == "Hello from fake ACP (swe-2-medium)."
+
+        # An explicitly picked advertised variant already encodes its effort tier:
+        # reasoning_config must not remap it.
+        explicit = client.chat.completions.create(
+            model="swe-2-max",
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_config={"effort": "low"},
+        )
+        assert explicit.choices[0].message.content == "Hello from fake ACP (swe-2-max)."
+    finally:
+        client.close()

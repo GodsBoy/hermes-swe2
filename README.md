@@ -145,15 +145,21 @@ In a chat, send `/model`, pick **Devin CLI (SWE-2)** from the provider menu, the
 | `HERMES_DEVIN_ACP_COMMAND` | `devin` | Override the CLI binary path |
 | `DEVIN_CLI_PATH` | Not set | Alternative binary path override |
 | `HERMES_DEVIN_ACP_ARGS` | `acp` | Override arguments with shell-style splitting, for example `acp --model swe-2-max` |
-| `DEVIN_MODEL` | set per request | Set automatically to the selected Hermes model unless `HERMES_DEVIN_ACP_ARGS` already contains `--model` |
+| `DEVIN_MODEL` | set at spawn | Set automatically to the selected Hermes model when the ACP child (re)spawns, unless `HERMES_DEVIN_ACP_ARGS` already contains `--model` |
 | `HERMES_DEVIN_PROMPT_TOKENS` | `150000` | Transcript token budget for the replayed prompt (see "Context window and compression") |
 | `DEVIN_API_KEY` / `WINDSURF_API_KEY` | Not set | Credential handed to the child and offered through ACP `authenticate` |
 
 Model ids are the ACP variant ids (`swe-2-max`, `swe-2-high`, `swe-2-medium`, `swe-1-7`, `swe-1-7-medium`, `swe-1-7-lightning`, `swe-1-7-lightning-medium`, `swe-1-6`, `swe-1-6-fast`) plus whatever the account catalog exposes. Family slugs and aliases such as `swe-2`, `opus`, or `gpt` also work: `DEVIN_MODEL` resolves them to the family default server-side (for example `swe-2` → `swe-2-high`). When available, Hermes merges the account catalog from `devin models list --format json` into the picker and caches it. Refresh the cached catalog with `/model --refresh` in a chat. Unlisted or policy disabled ids fall back to the CLI-level default with a warning in `agent.log`.
 
+### Reasoning effort (`/reasoning`)
+
+Devin encodes thinking effort in the model variant itself (`swe-2-medium` / `-high` / `-max`, `gpt-5.6-sol-none` / `-low` / ... / `-max`), not as a separate API parameter. The plugin bridges that: when the selected model is a family slug or alias (`swe-2`, `swe`, `opus`, ...), `/reasoning <level>` is mapped onto the matching advertised variant and applied through `session/set_config_option`. An explicitly picked variant (`swe-2-max`) already encodes its tier, so it always wins over `/reasoning` — a global `agent.reasoning_effort` in `config.yaml` will not silently downgrade it. When remapping applies, the exact tier wins; otherwise the nearest weaker advertised tier is used (it never escalates past the requested effort), and if the family has nothing at or below it, the family's lowest tier applies. `/reasoning show|full|hide|clamp` still controls whether ACP thought chunks are displayed. If a selected model cannot be mapped to a family (unknown alias), the effort is ignored and the model stays as selected.
+
 ### Context window and compression
 
-Each request replays the **entire Hermes transcript** into a fresh `devin acp` session, and Devin counts that prompt against the model's context window together with its own rules, skills and tool schemas. SWE-2 models allow 262k tokens total; `swe-1-7-lightning` allows about 202k. Two layers keep you under the limit:
+The plugin keeps one `devin acp` subprocess and session alive per agent (respawning the CLI costs ~20s: skills, rules, MCP connections). Follow-up calls send **only the new turns** to that live session, so Devin keeps its own running context instead of re-reading the whole Hermes transcript every call. A fresh session is started — and the full transcript replayed, trimmed to `HERMES_DEVIN_PROMPT_TOKENS` — when the child dies, the session idles past 20 minutes, or the transcript diverges (for example Hermes compression rewrote earlier history).
+
+A fresh session's replayed prompt counts against the model's context window together with Devin's own rules, skills and tool schemas. SWE-2 models allow 262k tokens total; `swe-1-7-lightning` allows about 202k. Two layers keep you under the limit:
 
 * **Hermes compression** (the real fix): set the model's context length so Hermes' compressor knows the true ceiling, for example in `~/.hermes/config.yaml`:
 

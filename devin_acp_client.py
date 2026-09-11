@@ -17,6 +17,7 @@ adapted for the ``devin`` binary and its auth surface:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -59,6 +60,27 @@ _DEFAULT_PROMPT_TOKEN_BUDGET = 150_000
 _CHARS_PER_TOKEN = 4
 _OMISSION_NOTE = "[... {count} earlier transcript message(s) omitted to fit the model context window ...]"
 _TRUNCATION_NOTE = "[... earlier content truncated to fit the model context window ...]\n"
+# Hermes' /reasoning ladder; Devin encodes the same idea as variant suffixes
+# (swe-2-medium/-high/-max, gpt-5.6-sol-none/-low/.../-max). The wire-side clamp
+# already folds ``ultra`` into ``max`` for chat-completions profiles.
+_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+_VARIANT_DECORATORS = ("fast", "priority")
+# Catalog aliases to family prefixes (from `devin models list`); exact variant ids
+# need no entry. Unknown aliases fall through to suffix-stripping unchanged.
+_FAMILY_ALIASES = {
+    "swe": "swe-2",
+    "opus": "claude-opus-5",
+    "claude": "claude-sonnet-5",
+    "sonnet": "claude-sonnet-5",
+    "gpt": "gpt-6-astra",
+    "gemini": "gemini-3.8-flash",
+}
+# The ACP subprocess and session are kept alive across calls: a respawn costs
+# ~20-30s of CLI startup (skills, rules, MCP connects) and every Hermes tool
+# round is a call. After this much idle time the child is reaped and the next
+# call starts fresh.
+_SESSION_IDLE_TTL_SECONDS = 20 * 60
+_WATCHDOG_INTERVAL_SECONDS = 60
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool", "context": "Context"}
 # Probe verdicts per binary path (~50ms --help paid once per process). Only definitive
 # True/False is cached, so a CLI installed mid-session is picked up.
@@ -190,6 +212,61 @@ def _enabled_ids(entries: Any, key: str) -> set[str]:
             if isinstance(e, dict) and not _is_disabled(e)}
 
 
+def _advertised_model_values(session: dict[str, Any]) -> set[str]:
+    """The model ids the session lets us select: the ``model`` config option's values,
+    else the legacy ``models.availableModels`` list."""
+    for option in session.get("configOptions") or []:
+        if isinstance(option, dict) and "model" in (option.get("category"), option.get("id")):
+            return _enabled_ids(option.get("options"), "value")
+    return _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
+
+
+def _family_base(model_id: str) -> str:
+    """Reduce a variant id to its family prefix (``swe-2-max`` -> ``swe-2``,
+    ``gpt-5.6-sol-low-priority`` -> ``gpt-5.6-sol``)."""
+    base = model_id.strip().lower()
+    churn = True
+    while churn:
+        churn = False
+        for suffix in (*_EFFORT_ORDER, *_VARIANT_DECORATORS):
+            if base.endswith(f"-{suffix}"):
+                base = base[: -(len(suffix) + 1)]
+                churn = True
+                break
+    return base
+
+
+def _effort_variant(model_id: str, effort: str, advertised: set[str]) -> str | None:
+    """Map a requested model plus a Hermes ``/reasoning`` effort onto an advertised
+    variant value. Exact tier first, then the nearest weaker one (never escalates),
+    then the family's lowest advertised tier. A bare family id counts as its top
+    tier (``swe-1-7`` is "SWE-1.7 Max"). Returns None when nothing maps."""
+    effort = str(effort or "").strip().lower()
+    if effort not in _EFFORT_ORDER or not advertised:
+        return None
+    base = _FAMILY_ALIASES.get(model_id.strip().lower()) or _family_base(model_id)
+    tiers: dict[str, str] = {}
+    for decorated_ok in (False, True):
+        for value in advertised:
+            candidate, is_decorated = value, False
+            for decorator in _VARIANT_DECORATORS:
+                if candidate.endswith(f"-{decorator}"):
+                    candidate = candidate[: -(len(decorator) + 1)]
+                    is_decorated = True
+            if is_decorated and not decorated_ok:
+                continue
+            if candidate == base:
+                tiers.setdefault("max", value)
+            elif candidate.startswith(f"{base}-") and candidate[len(base) + 1:] in _EFFORT_ORDER:
+                tiers.setdefault(candidate[len(base) + 1:], value)
+    if not tiers:
+        return None
+    for tier in reversed(_EFFORT_ORDER[: _EFFORT_ORDER.index(effort) + 1]):
+        if tier in tiers:
+            return tiers[tier]
+    return next((tiers[tier] for tier in _EFFORT_ORDER if tier in tiers), None)
+
+
 def _model_selection_request(session: dict[str, Any], requested_model: str) -> tuple[str, dict[str, Any]] | None:
     """ACP request selecting ``requested_model`` for ``session``: stable v1
     ``session/set_config_option``, else ``session/set_model`` when no model config
@@ -265,6 +342,16 @@ def _fit_transcript_turns(turns: list[str], token_budget: int) -> list[str]:
     return kept
 
 
+def _render_transcript_turns(messages: list[dict[str, Any]]) -> list[str]:
+    """Render each message to its ``Role:\\ncontent`` transcript block."""
+    turns: list[str] = []
+    for message in (m for m in messages if isinstance(m, dict)):
+        role = str(message.get("role") or "unknown").strip().lower()
+        if rendered := _render_message_content(message.get("content")):
+            turns.append(f"{_ROLE_LABELS.get(role, 'Context')}:\n{rendered}")
+    return turns
+
+
 def _format_messages_as_prompt(
     messages: list[dict[str, Any]], model: str | None = None, tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
@@ -273,11 +360,7 @@ def _format_messages_as_prompt(
     # session/set_model; a prompt-text mention makes a substituted backend model falsely
     # self-identify as the requested one.
     sections: list[str] = [*_PROMPT_PREAMBLE, *_render_tool_bridge_sections(tools, tool_choice)]
-    transcript: list[str] = []
-    for message in (m for m in messages if isinstance(m, dict)):
-        role = str(message.get("role") or "unknown").strip().lower()
-        if rendered := _render_message_content(message.get("content")):
-            transcript.append(f"{_ROLE_LABELS.get(role, 'Context')}:\n{rendered}")
+    transcript = _render_transcript_turns(messages)
     closing = "Continue the conversation from the latest user request."
     if transcript:
         fixed_cost = _estimate_tokens("\n\n".join(sections)) + _estimate_tokens(closing)
@@ -285,6 +368,16 @@ def _format_messages_as_prompt(
         sections.append("Conversation transcript:\n\n" + "\n\n".join(fitted))
     sections.append(closing)
     return "\n\n".join(section.strip() for section in sections if section and section.strip())
+
+
+def _format_delta_prompt(turns: list[str]) -> str:
+    """Incremental send for the kept-alive session: only turns not yet seen."""
+    body = "\n\n".join(turns)
+    return f"New conversation context since the last turn:\n\n{body}\n\nContinue the conversation."
+
+
+def _turn_hash(turn: str) -> str:
+    return hashlib.sha1(turn.encode("utf-8")).hexdigest()
 
 
 def _render_message_content(content: Any) -> str:
@@ -373,11 +466,24 @@ class DevinACPClient:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
         self.is_closed, self._active_process = False, None
         self._active_process_lock = threading.Lock()
+        # Kept-alive ACP session state. One child + session serves every call until
+        # it dies, idles out, or the transcript diverges (e.g. Hermes compression
+        # rewrote history), at which point the next call respawns and replays.
+        self._call_lock = threading.Lock()
+        self._session: dict[str, Any] = {}
+        self._session_id = ""
+        self._sent_hashes: list[str] = []
+        self._applied_model = ""
+        self._inbox: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._stderr_tail: deque[str] = deque(maxlen=40)
+        self._request_ids = iter(range(1, 1 << 62))
+        self._last_active = 0.0
+        self._watchdog_started = False
 
-    def close(self) -> None:
+    def _teardown(self) -> None:
+        """Kill the child and forget the session; the client itself stays usable."""
         with self._active_process_lock:
             proc, self._active_process = self._active_process, None
-        self.is_closed = True
         try:
             if proc is not None:
                 proc.terminate()
@@ -385,15 +491,22 @@ class DevinACPClient:
         except Exception:
             with contextlib.suppress(Exception):
                 proc.kill()
+        self._session, self._session_id = {}, ""
+        self._sent_hashes, self._applied_model = [], ""
+
+    def close(self) -> None:
+        self._teardown()
+        self.is_closed = True
 
     def _create_chat_completion(
         self, *, model: str | None = None, messages: list[dict[str, Any]] | None = None,
         timeout: float | None = None, tools: list[dict[str, Any]] | None = None,
-        tool_choice: Any = None, stream: bool = False, **_: Any,
+        tool_choice: Any = None, stream: bool = False, reasoning_config: dict | None = None,
+        **_: Any,
     ) -> Any:
-        prompt_text = _format_messages_as_prompt(messages or [], model=model, tools=tools, tool_choice=tool_choice)
-        response_text, reasoning, stop_reason = self._run_prompt(
-            prompt_text, timeout_seconds=_effective_timeout(timeout), model=model
+        response_text, reasoning, stop_reason = self._run_turn(
+            messages or [], timeout_seconds=_effective_timeout(timeout), model=model,
+            reasoning_config=reasoning_config, tools=tools, tool_choice=tool_choice,
         )
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
         if stop_reason in ("refusal", "cancelled") and not cleaned_text:
@@ -443,13 +556,44 @@ class DevinACPClient:
             self._active_process = proc
         return proc
 
-    def _run_prompt(
-        self, prompt_text: str, *, timeout_seconds: float, model: str | None = None
-    ) -> tuple[str, str, str]:
-        requested_model = str(model or "").strip()
+    @staticmethod
+    def _reasoning_effort(reasoning_config: dict | None) -> str:
+        """Normalise Hermes' ``reasoning_config`` to an effort level; ``enabled: false``
+        counts as ``none``."""
+        if not isinstance(reasoning_config, dict):
+            return ""
+        if reasoning_config.get("enabled") is False:
+            return "none"
+        return str(reasoning_config.get("effort") or "").strip().lower()
+
+    def _live_process(self) -> subprocess.Popen[str] | None:
+        with self._active_process_lock:
+            proc = self._active_process
+        return proc if proc is not None and proc.poll() is None else None
+
+    def _ensure_watchdog(self) -> None:
+        if self._watchdog_started:
+            return
+        self._watchdog_started = True
+
+        def _watch() -> None:
+            while not self.is_closed:
+                if (
+                    self._live_process() is not None
+                    and self._last_active
+                    and time.monotonic() - self._last_active > _SESSION_IDLE_TTL_SECONDS
+                ):
+                    logger.debug("Devin ACP session idle past TTL; reaping subprocess.")
+                    self._teardown()
+                time.sleep(_WATCHDOG_INTERVAL_SECONDS)
+
+        threading.Thread(target=_watch, daemon=True).start()
+
+    def _handshake(self, requested_model: str, timeout_seconds: float) -> dict[str, Any]:
+        """Spawn the child, run initialize/authenticate/session/new, remember the session."""
         proc = self._spawn(requested_model)
-        inbox: queue.Queue[dict[str, Any]] = queue.Queue()
-        stderr_tail: deque[str] = deque(maxlen=40)
+        self._inbox = queue.Queue()
+        self._stderr_tail = deque(maxlen=40)
 
         def _decode(line: str) -> dict[str, Any]:
             try:
@@ -461,76 +605,147 @@ class DevinACPClient:
             for line in stream or ():
                 sink(line)
 
-        threading.Thread(target=_pump, args=(proc.stdout, lambda line: inbox.put(_decode(line))), daemon=True).start()
-        threading.Thread(target=_pump, args=(proc.stderr, lambda line: stderr_tail.append(line.rstrip("\n"))), daemon=True).start()
-        request_ids = iter(range(1, 1 << 62))
+        threading.Thread(target=_pump, args=(proc.stdout, lambda line: self._inbox.put(_decode(line))), daemon=True).start()
+        threading.Thread(target=_pump, args=(proc.stderr, lambda line: self._stderr_tail.append(line.rstrip("\n"))), daemon=True).start()
+        init_result = self._request("initialize", _INITIALIZE_PARAMS, timeout_seconds) or {}
+        if auth_params := _authenticate_request(init_result, _resolve_devin_key()):
+            try:
+                self._request("authenticate", auth_params, timeout_seconds)
+            except Exception as exc:
+                logger.debug("Devin ACP authenticate request failed; relying on stored CLI credentials: %s", exc)
+        session = self._request("session/new", {"cwd": self._acp_cwd, "mcpServers": []}, timeout_seconds) or {}
+        session_id = str(session.get("sessionId") or "").strip()
+        if not session_id:
+            raise RuntimeError("Devin ACP did not return a sessionId.")
+        self._session, self._session_id = session, session_id
+        self._ensure_watchdog()
+        return session
 
-        def _request(method: str, params: dict[str, Any], *, text_parts: list[str] | None = None,
-                     reasoning_parts: list[str] | None = None) -> Any:
-            request_id = next(request_ids)
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
-            proc.stdin.flush()
-            deadline = time.monotonic() + timeout_seconds
-            while time.monotonic() < deadline and proc.poll() is None:
-                try:
-                    msg = inbox.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                if self._handle_server_message(
-                    msg, process=proc, cwd=self._acp_cwd, text_parts=text_parts, reasoning_parts=reasoning_parts
-                ) or msg.get("id") != request_id:
-                    continue
-                if "error" in msg:
-                    err = msg.get("error") or {}
-                    raise RuntimeError(f"Devin ACP {method} failed: {err.get('message') or err}")
-                return msg.get("result")
-            stderr_text = "\n".join(stderr_tail).strip()
-            if proc.poll() is not None and stderr_text:
-                raise RuntimeError(f"Devin ACP process exited early: {stderr_text}")
-            raise TimeoutError(f"Timed out waiting for Devin ACP response to {method}.")
+    def _request(
+        self, method: str, params: dict[str, Any], timeout_seconds: float,
+        *, text_parts: list[str] | None = None, reasoning_parts: list[str] | None = None,
+    ) -> Any:
+        proc = self._live_process()
+        if proc is None or proc.stdin is None:
+            raise RuntimeError("Devin ACP process is not running.")
+        request_id = next(self._request_ids)
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
+        proc.stdin.flush()
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline and proc.poll() is None:
+            try:
+                msg = self._inbox.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if self._handle_server_message(
+                msg, process=proc, cwd=self._acp_cwd, text_parts=text_parts, reasoning_parts=reasoning_parts
+            ) or msg.get("id") != request_id:
+                continue
+            if "error" in msg:
+                err = msg.get("error") or {}
+                raise RuntimeError(f"Devin ACP {method} failed: {err.get('message') or err}")
+            return msg.get("result")
+        stderr_text = "\n".join(self._stderr_tail).strip()
+        if proc.poll() is not None and stderr_text:
+            raise RuntimeError(f"Devin ACP process exited early: {stderr_text}")
+        raise TimeoutError(f"Timed out waiting for Devin ACP response to {method}.")
 
+    def _send_prompt(self, prompt_text: str, timeout_seconds: float) -> tuple[str, str, str]:
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        prompt = {"sessionId": self._session_id, "prompt": [{"type": "text", "text": prompt_text}]}
+        prompt_result = self._request(
+            "session/prompt", prompt, timeout_seconds, text_parts=text_parts, reasoning_parts=reasoning_parts
+        ) or {}
+        return (
+            "".join(text_parts),
+            "".join(reasoning_parts),
+            str(prompt_result.get("stopReason") or ""),
+        )
+
+    def _apply_model_selection(
+        self, session: dict[str, Any], requested_model: str, reasoning_config: dict | None,
+        timeout_seconds: float,
+    ) -> None:
+        """Apply the requested model to the live session (idempotent across calls).
+
+        ``/reasoning``: Hermes' effort level maps onto Devin's variant-encoded
+        tiers (``swe-2`` + ``high`` -> ``swe-2-high``) resolved against what the
+        session advertises. An id the session advertises verbatim is an explicit
+        variant pick and already encodes its tier, so it wins over the effort
+        setting; only family slugs/aliases get remapped."""
+        selected_model = str(requested_model or "").strip()
+        if not selected_model or selected_model == "devin" or selected_model == self._applied_model:
+            return
+        advertised = _advertised_model_values(session)
+        if (effort := self._reasoning_effort(reasoning_config)) and selected_model not in advertised:
+            if (remapped := _effort_variant(selected_model, effort, advertised)) and remapped != selected_model:
+                logger.info("Devin ACP reasoning effort %r maps model %r -> %r", effort, selected_model, remapped)
+                selected_model = remapped
         try:
-            init_result = _request("initialize", _INITIALIZE_PARAMS) or {}
-            if auth_params := _authenticate_request(init_result, _resolve_devin_key()):
-                try:
-                    _request("authenticate", auth_params)
-                except Exception as exc:
-                    logger.debug("Devin ACP authenticate request failed; relying on stored CLI credentials: %s", exc)
-            session = _request("session/new", {"cwd": self._acp_cwd, "mcpServers": []}) or {}
-            session_id = str(session.get("sessionId") or "").strip()
-            if not session_id:
-                raise RuntimeError("Devin ACP did not return a sessionId.")
-            if requested_model and requested_model != "devin":
-                try:
-                    if (selection := _model_selection_request(session, requested_model)) is not None:
-                        _request(*selection)
-                    elif not any(
-                        isinstance(option, dict) and "model" in (option.get("category"), option.get("id"))
-                        for option in (session.get("configOptions") or [])
-                    ) and not (session.get("models") or {}).get("availableModels"):
-                        logger.debug(
-                            "Devin ACP did not advertise model options; DEVIN_MODEL=%r was applied.",
-                            requested_model,
-                        )
-                    else:
-                        logger.warning(
-                            "Devin ACP does not advertise model %r in its model options; relying on "
-                            "the CLI-level model (DEVIN_MODEL/--model) resolved at spawn.",
-                            requested_model,
-                        )
-                except Exception as exc:
-                    logger.warning("Devin ACP model selection for %r failed; continuing with the session default: %s", requested_model, exc)
-            text_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            prompt = {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]}
-            prompt_result = _request("session/prompt", prompt, text_parts=text_parts, reasoning_parts=reasoning_parts) or {}
-            return (
-                "".join(text_parts),
-                "".join(reasoning_parts),
-                str(prompt_result.get("stopReason") or ""),
+            if (selection := _model_selection_request(session, selected_model)) is not None:
+                self._request(selection[0], selection[1], timeout_seconds)
+                self._applied_model = selected_model
+            elif not any(
+                isinstance(option, dict) and "model" in (option.get("category"), option.get("id"))
+                for option in (session.get("configOptions") or [])
+            ) and not (session.get("models") or {}).get("availableModels"):
+                logger.debug(
+                    "Devin ACP did not advertise model options; DEVIN_MODEL=%r was applied.",
+                    requested_model,
+                )
+            else:
+                logger.warning(
+                    "Devin ACP does not advertise model %r in its model options; relying on "
+                    "the CLI-level model (DEVIN_MODEL/--model) resolved at spawn.",
+                    selected_model,
+                )
+        except Exception as exc:
+            logger.warning("Devin ACP model selection for %r failed; continuing with the session default: %s", selected_model, exc)
+
+    def _run_turn(
+        self, messages: list[dict[str, Any]], *, timeout_seconds: float, model: str | None = None,
+        reasoning_config: dict | None = None, tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
+    ) -> tuple[str, str, str]:
+        requested_model = str(model or "").strip()
+        with self._call_lock:
+            turns = _render_transcript_turns(messages)
+            hashes = [_turn_hash(turn) for turn in turns]
+            session_usable = (
+                self._live_process() is not None
+                and self._session_id
+                and self._sent_hashes == hashes[: len(self._sent_hashes)]
             )
-        finally:
-            self.close()
+            if session_usable and time.monotonic() - self._last_active > _SESSION_IDLE_TTL_SECONDS:
+                session_usable = False
+            if session_usable:
+                delta = turns[len(self._sent_hashes):]
+                prompt_text = _format_delta_prompt(delta) if delta else "Continue the conversation."
+                try:
+                    self._apply_model_selection(self._session, requested_model, reasoning_config, timeout_seconds)
+                    result = self._send_prompt(prompt_text, timeout_seconds)
+                except Exception as exc:
+                    logger.info("Devin ACP live session turn failed (%s); replaying on a fresh session.", exc)
+                    self._teardown()
+                else:
+                    self._sent_hashes = hashes
+                    self._last_active = time.monotonic()
+                    return result
+            self._teardown()
+            try:
+                session = self._handshake(requested_model, timeout_seconds)
+                self._apply_model_selection(session, requested_model, reasoning_config, timeout_seconds)
+                prompt_text = _format_messages_as_prompt(
+                    messages, model=model, tools=tools, tool_choice=tool_choice
+                )
+                result = self._send_prompt(prompt_text, timeout_seconds)
+            except Exception:
+                self._teardown()
+                raise
+            self._sent_hashes = hashes
+            self._last_active = time.monotonic()
+            return result
 
     def _handle_server_message(
         self, msg: dict[str, Any], *, process: subprocess.Popen[str], cwd: str,

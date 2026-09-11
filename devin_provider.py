@@ -54,6 +54,15 @@ class DevinACPProfile(ProviderProfile):
         """Model listing is owned by the `devin acp` session (availableModels)."""
         return None
 
+    def build_api_kwargs_extras(
+        self, *, reasoning_config: dict | None = None, **context: Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Forward Hermes' ``/reasoning`` config to the ACP client, which maps the
+        effort level onto Devin's variant-encoded tiers (``swe-2`` + ``high`` ->
+        ``swe-2-high``)."""
+        extras = {"reasoning_config": reasoning_config} if isinstance(reasoning_config, dict) else {}
+        return {}, extras
+
 
 def _extract_model_ids(payload: object) -> list[str]:
     """Extract model ids from flat and family-grouped CLI catalog responses."""
