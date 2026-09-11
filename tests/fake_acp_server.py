@@ -29,7 +29,7 @@ for line in sys.stdin:
             "id": request_id,
             "result": {
                 "sessionId": session_id,
-                "models": {"availableModels": [{"modelId": "swe-2"}]},
+                "models": {"availableModels": [{"modelId": "swe-2-max"}]},
             },
         })
     elif method == "session/set_model":

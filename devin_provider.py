@@ -19,17 +19,19 @@ logger = logging.getLogger(__name__)
 PROVIDER_NAME = "devin"
 DISPLAY_NAME = "Devin CLI (SWE-2)"
 BASE_URL = "acp://devin"
+# ACP `session/set_config_option` only accepts exact variant ids, so the fallback
+# list carries the real `model_uid` values, not family slugs or aliases. Family
+# names still work when typed manually: `DEVIN_MODEL` resolves them server-side.
 FALLBACK_MODELS = (
-    "swe-2",
-    "swe",
+    "swe-2-max",
+    "swe-2-high",
+    "swe-2-medium",
     "swe-1-7",
+    "swe-1-7-medium",
     "swe-1-7-lightning",
+    "swe-1-7-lightning-medium",
+    "swe-1-6",
     "swe-1-6-fast",
-    "opus",
-    "sonnet",
-    "gpt",
-    "codex",
-    "gemini",
 )
 
 
@@ -75,7 +77,7 @@ def _extract_model_ids(payload: object) -> list[str]:
         if not isinstance(value, dict):
             return
         has_nested_list = any(isinstance(item, list) for item in value.values())
-        for key in ("id", "model", "name"):
+        for key in ("id", "model_uid", "slug", "model", "name"):
             item = value.get(key)
             if isinstance(item, str) and (key != "name" or not has_nested_list):
                 add(item)

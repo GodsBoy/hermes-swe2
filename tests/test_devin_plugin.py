@@ -65,7 +65,8 @@ def test_register_adds_devin_profile():
     assert profile.auth_type == "external_process"
     assert profile.process_command == "devin"
     assert profile.process_args == ("acp",)
-    assert "swe-2" in profile.fallback_models
+    assert "swe-2-max" in profile.fallback_models
+    assert all(" " not in model for model in profile.fallback_models)
     for alias in ("devin-cli", "swe-2", "cognition"):
         assert get_provider_profile(alias) is profile
 
@@ -78,7 +79,7 @@ def test_register_surfaces_provider_in_model_picker(monkeypatch, tmp_path):
     assert HERMES_OVERLAYS["devin"].auth_type == "external_process"
     assert _LABEL_OVERRIDES["devin"] == "Devin CLI (SWE-2)"
     assert get_label("devin") == "Devin CLI (SWE-2)"
-    assert _PROVIDER_MODELS["devin"][0] == "swe-2"
+    assert _PROVIDER_MODELS["devin"][0] == "swe-2-max"
 
     pytest.importorskip("requests", reason="hermes model picker needs requests")
     # The picker row appears once the CLI resolves on PATH, exactly like copilot-acp.
@@ -120,13 +121,20 @@ def test_extract_model_ids_handles_flat_and_family_shapes():
         "families": [{
             "name": "Claude",
             "models": [{"id": "sonnet", "short_name": ["sonnet", "claude-sonnet-4"]}],
+        }, {
+            "family_label": "SWE-2",
+            "slug": "swe-2",
+            "aliases": ["swe"],
+            "variants": [{"model_uid": "swe-2-max", "label": "SWE-2 Max"}],
         }],
     }
     model_ids = provider_mod._extract_model_ids(payload)
     assert model_ids == [
         "swe-2", "opus", "claude-opus-4-7", "gpt-5", "gpt", "sonnet", "claude-sonnet-4",
+        "swe", "swe-2-max",
     ]
     assert "Claude" not in model_ids
+    assert "SWE-2 Max" not in model_ids
 
 
 def test_fetch_cli_models_merges_live_after_curated(monkeypatch, tmp_path):
@@ -141,7 +149,7 @@ printf '%s\n' '{"models":[{"id":"claude-opus-4-7"},{"id":"swe-2"}]}'
     monkeypatch.setenv("HERMES_DEVIN_ACP_COMMAND", str(fake_cli))
     models = provider_mod.fetch_cli_models("devin", False)
     assert models[:len(provider_mod.FALLBACK_MODELS)] == list(provider_mod.FALLBACK_MODELS)
-    assert models[-1] == "claude-opus-4-7"
+    assert models[-2:] == ["claude-opus-4-7", "swe-2"]
     assert models.count("swe-2") == 1
 
 
@@ -251,6 +259,39 @@ def test_prompt_includes_transcript_and_tool_bridge():
     assert "System:" in prompt and "User:" in prompt
 
 
+def test_prompt_trims_oldest_transcript_turns_to_budget(monkeypatch):
+    client_mod = _load_client_module()
+    monkeypatch.setenv("HERMES_DEVIN_PROMPT_TOKENS", "1200")
+    messages = [{"role": "user", "content": f"turn {i} " + "x" * 400} for i in range(20)]
+    messages.append({"role": "user", "content": "latest question"})
+    prompt = client_mod._format_messages_as_prompt(messages, model="swe-2-max")
+    assert "latest question" in prompt
+    assert "earlier transcript message(s) omitted" in prompt
+    assert "turn 0 " not in prompt
+    assert len(prompt) < 1200 * client_mod._CHARS_PER_TOKEN + 2000
+
+
+def test_prompt_truncates_single_oversized_turn(monkeypatch):
+    client_mod = _load_client_module()
+    monkeypatch.setenv("HERMES_DEVIN_PROMPT_TOKENS", "1000")
+    prompt = client_mod._format_messages_as_prompt(
+        [{"role": "user", "content": "A" * 40000 + "TAIL-KEEPER"}],
+        model="swe-2-max",
+    )
+    assert "TAIL-KEEPER" in prompt
+    assert "truncated to fit" in prompt
+
+
+def test_prompt_token_budget_env_override(monkeypatch):
+    client_mod = _load_client_module()
+    monkeypatch.delenv("HERMES_DEVIN_PROMPT_TOKENS", raising=False)
+    assert client_mod._prompt_token_budget() == client_mod._DEFAULT_PROMPT_TOKEN_BUDGET
+    monkeypatch.setenv("HERMES_DEVIN_PROMPT_TOKENS", "80000")
+    assert client_mod._prompt_token_budget() == 80000
+    monkeypatch.setenv("HERMES_DEVIN_PROMPT_TOKENS", "junk")
+    assert client_mod._prompt_token_budget() == client_mod._DEFAULT_PROMPT_TOKEN_BUDGET
+
+
 def test_model_selection_prefers_config_options():
     client_mod = _load_client_module()
     session = {
@@ -301,15 +342,15 @@ def test_fake_acp_server_end_to_end(monkeypatch):
     fake_server = Path(__file__).with_name("fake_acp_server.py")
     client = client_mod.DevinACPClient(command=sys.executable, args=[str(fake_server)])
     response = client.chat.completions.create(
-        model="swe-2", messages=[{"role": "user", "content": "hi"}],
+        model="swe-2-max", messages=[{"role": "user", "content": "hi"}],
     )
-    assert response.choices[0].message.content == "Hello from fake ACP (swe-2)."
+    assert response.choices[0].message.content == "Hello from fake ACP (swe-2-max)."
     assert response.choices[0].message.reasoning == "Thinking about the request."
     assert response.choices[0].finish_reason == "stop"
 
     stream = client.chat.completions.create(
-        model="swe-2", messages=[{"role": "user", "content": "hi"}], stream=True,
+        model="swe-2-max", messages=[{"role": "user", "content": "hi"}], stream=True,
     )
     assert stream
-    assert stream[0].choices[0].delta.content == "Hello from fake ACP (swe-2)."
+    assert stream[0].choices[0].delta.content == "Hello from fake ACP (swe-2-max)."
     assert stream[0].choices[0].finish_reason == "stop"

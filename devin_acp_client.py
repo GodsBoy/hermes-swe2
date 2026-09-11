@@ -51,6 +51,14 @@ from tools.environments.local import hermes_subprocess_env
 ACP_MARKER_BASE_URL = "acp://devin"
 logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 900.0
+# The whole Hermes transcript is replayed as one ACP prompt, and Devin counts it
+# against the model's context window together with its own rules, skills and tool
+# schemas (SWE-2 family: 262k tokens total). The transcript is trimmed to this
+# budget, oldest turns first, leaving headroom for that server-side overhead.
+_DEFAULT_PROMPT_TOKEN_BUDGET = 150_000
+_CHARS_PER_TOKEN = 4
+_OMISSION_NOTE = "[... {count} earlier transcript message(s) omitted to fit the model context window ...]"
+_TRUNCATION_NOTE = "[... earlier content truncated to fit the model context window ...]\n"
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool", "context": "Context"}
 # Probe verdicts per binary path (~50ms --help paid once per process). Only definitive
 # True/False is cached, so a CLI installed mid-session is picked up.
@@ -224,6 +232,39 @@ def _authenticate_request(init_result: dict[str, Any], api_key: str) -> dict[str
     return {"methodId": method_id} if method_id else None
 
 
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // _CHARS_PER_TOKEN)
+
+
+def _prompt_token_budget() -> int:
+    raw = os.getenv("HERMES_DEVIN_PROMPT_TOKENS", "").strip()
+    try:
+        return max(1_000, int(raw)) if raw else _DEFAULT_PROMPT_TOKEN_BUDGET
+    except ValueError:
+        return _DEFAULT_PROMPT_TOKEN_BUDGET
+
+
+def _fit_transcript_turns(turns: list[str], token_budget: int) -> list[str]:
+    """Keep the newest turns that fit the token budget, dropping oldest first."""
+    kept: list[str] = []
+    used = 0
+    for turn in reversed(turns):
+        cost = _estimate_tokens(turn)
+        if kept and used + cost > token_budget:
+            break
+        kept.append(turn)
+        used += cost
+    kept.reverse()
+    dropped = len(turns) - len(kept)
+    if kept and used > token_budget:
+        # The newest turn alone exceeds the budget: keep its tail, where the
+        # latest instructions live.
+        kept[0] = _TRUNCATION_NOTE + kept[0][-(token_budget * _CHARS_PER_TOKEN):]
+    if dropped:
+        kept.insert(0, _OMISSION_NOTE.format(count=dropped))
+    return kept
+
+
 def _format_messages_as_prompt(
     messages: list[dict[str, Any]], model: str | None = None, tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
@@ -237,9 +278,12 @@ def _format_messages_as_prompt(
         role = str(message.get("role") or "unknown").strip().lower()
         if rendered := _render_message_content(message.get("content")):
             transcript.append(f"{_ROLE_LABELS.get(role, 'Context')}:\n{rendered}")
+    closing = "Continue the conversation from the latest user request."
     if transcript:
-        sections.append("Conversation transcript:\n\n" + "\n\n".join(transcript))
-    sections.append("Continue the conversation from the latest user request.")
+        fixed_cost = _estimate_tokens("\n\n".join(sections)) + _estimate_tokens(closing)
+        fitted = _fit_transcript_turns(transcript, max(1_000, _prompt_token_budget() - fixed_cost))
+        sections.append("Conversation transcript:\n\n" + "\n\n".join(fitted))
+    sections.append(closing)
     return "\n\n".join(section.strip() for section in sections if section and section.strip())
 
 
@@ -469,7 +513,11 @@ class DevinACPClient:
                             requested_model,
                         )
                     else:
-                        logger.warning("Devin ACP does not offer model %r; using the session default.", requested_model)
+                        logger.warning(
+                            "Devin ACP does not advertise model %r in its model options; relying on "
+                            "the CLI-level model (DEVIN_MODEL/--model) resolved at spawn.",
+                            requested_model,
+                        )
                 except Exception as exc:
                     logger.warning("Devin ACP model selection for %r failed; continuing with the session default: %s", requested_model, exc)
             text_parts: list[str] = []

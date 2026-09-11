@@ -29,7 +29,7 @@ Cognition's **SWE-2** is one of the strongest software engineering models availa
 ## ✨ Features
 
 * 🔌 **Drop in provider:** registers as `devin`; `--provider devin`, `hermes model`, `hermes setup`, and `hermes doctor` pick it up automatically
-* 🧬 **SWE and frontier model picker:** the picker lists the SWE models plus the frontier families `opus`, `sonnet`, `gpt`, `codex`, and `gemini`. When the CLI is installed, the live list from `devin models list --format json` is merged in and cached by Hermes
+* 🧬 **SWE and frontier model picker:** the picker lists the real ACP model ids (`swe-2-max`, `swe-2-high`, `swe-2-medium`, `swe-1-7*`, `swe-1-6*`). When the CLI is installed, the live catalog from `devin models list --format json` (variants, families, and aliases such as `opus`, `sonnet`, `gpt`, `gemini`) is merged in and cached by Hermes
 * 🛠️ **Full tool calling:** Hermes tool schemas cross the bridge as `<tool_call>` blocks, while Hermes continues to execute the tools
 * 🌊 **Streaming:** `session/update` chunks map back to OpenAI stream chunks
 * 🔒 **Fail closed:** permission prompts are denied, and `fs/*` requests are confined to the session working directory
@@ -131,8 +131,8 @@ devin auth login
 ### Select the model
 
 ```bash
-hermes model                      # → "Devin CLI (SWE-2)" → swe-2
-hermes --provider devin --model swe-2
+hermes model                      # → "Devin CLI (SWE-2)" → swe-2-max
+hermes --provider devin --model swe-2-max
 hermes doctor                     # confirms the `devin` binary resolves
 ```
 
@@ -144,13 +144,38 @@ In a chat, send `/model`, pick **Devin CLI (SWE-2)** from the provider menu, the
 | --- | --- | --- |
 | `HERMES_DEVIN_ACP_COMMAND` | `devin` | Override the CLI binary path |
 | `DEVIN_CLI_PATH` | Not set | Alternative binary path override |
-| `HERMES_DEVIN_ACP_ARGS` | `acp` | Override arguments with shell-style splitting, for example `acp --model swe-2` |
+| `HERMES_DEVIN_ACP_ARGS` | `acp` | Override arguments with shell-style splitting, for example `acp --model swe-2-max` |
 | `DEVIN_MODEL` | set per request | Set automatically to the selected Hermes model unless `HERMES_DEVIN_ACP_ARGS` already contains `--model` |
+| `HERMES_DEVIN_PROMPT_TOKENS` | `150000` | Transcript token budget for the replayed prompt (see "Context window and compression") |
 | `DEVIN_API_KEY` / `WINDSURF_API_KEY` | Not set | Credential handed to the child and offered through ACP `authenticate` |
 
-Model ids include the curated SWE models and frontier families such as `opus`, `sonnet`, `gpt`, `codex`, and `gemini`. When available, Hermes merges the account catalog from `devin models list --format json` into the picker and caches it. Refresh the cached catalog with `/model --refresh` in a chat. Unlisted or policy disabled ids fall back to the session default with a warning in `agent.log`.
+Model ids are the ACP variant ids (`swe-2-max`, `swe-2-high`, `swe-2-medium`, `swe-1-7`, `swe-1-7-medium`, `swe-1-7-lightning`, `swe-1-7-lightning-medium`, `swe-1-6`, `swe-1-6-fast`) plus whatever the account catalog exposes. Family slugs and aliases such as `swe-2`, `opus`, or `gpt` also work: `DEVIN_MODEL` resolves them to the family default server-side (for example `swe-2` → `swe-2-high`). When available, Hermes merges the account catalog from `devin models list --format json` into the picker and caches it. Refresh the cached catalog with `/model --refresh` in a chat. Unlisted or policy disabled ids fall back to the CLI-level default with a warning in `agent.log`.
+
+### Context window and compression
+
+Each request replays the **entire Hermes transcript** into a fresh `devin acp` session, and Devin counts that prompt against the model's context window together with its own rules, skills and tool schemas. SWE-2 models allow 262k tokens total; `swe-1-7-lightning` allows about 202k. Two layers keep you under the limit:
+
+* **Hermes compression** (the real fix): set the model's context length so Hermes' compressor knows the true ceiling, for example in `~/.hermes/config.yaml`:
+
+  ```yaml
+  model:
+    context_length: 200000   # leave headroom below SWE-2's 262k
+  compression:
+    enabled: true
+    threshold: 0.9           # compress once the conversation passes 90% of context_length
+  ```
+
+  If `model.context_length` is set higher than what the selected SWE model actually supports, compression kicks in too late (or never) and every call fails with `The prompt to the model was too long`. This bites hardest after `/model`-switching a long session that was built under a 1M-context model: the transcript is already over the limit. Starting a fresh session (`/new`) is the quickest recovery.
+* **Plugin-side trimming** (the safety net): before sending, the prompt is trimmed to `HERMES_DEVIN_PROMPT_TOKENS` (default 150k), oldest transcript turns first, with a marker noting how many were omitted. This keeps the call working instead of hard-failing, but dropped context is lost for that turn, so prefer correctly tuned compression for full-fidelity history.
 
 ## 🔍 Troubleshooting
+
+<details>
+<summary><b>"The prompt to the model was too long" / provider fails after retries</b></summary>
+
+The replayed transcript exceeds the model's context window (262k for SWE-2). Start a fresh session with `/new`, and see "Context window and compression" above: set `model.context_length` in `config.yaml` at or below the model's real limit so Hermes compression triggers in time. The plugin trims to `HERMES_DEVIN_PROMPT_TOKENS` as a safety net, so after updating you should see an "earlier transcript message(s) omitted" marker rather than this error.
+
+</details>
 
 <details>
 <summary><b>"Could not find the 'devin' CLI command"</b></summary>
