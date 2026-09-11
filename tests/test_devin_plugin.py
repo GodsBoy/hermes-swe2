@@ -50,6 +50,11 @@ def _load_client_module():
     return module
 
 
+def _load_provider_module():
+    _load_plugin_module()
+    return sys.modules["_test_devin_provider_plugin.devin_provider"]
+
+
 def test_register_adds_devin_profile():
     _load_plugin_module()
     from providers import get_provider_profile
@@ -78,7 +83,14 @@ def test_register_surfaces_provider_in_model_picker(monkeypatch, tmp_path):
     pytest.importorskip("requests", reason="hermes model picker needs requests")
     # The picker row appears once the CLI resolves on PATH, exactly like copilot-acp.
     fake_cli = tmp_path / "devin"
-    fake_cli.write_text("#!/bin/sh\necho acp\n")
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "models" ]; then\n'
+        """  printf '%s\\n' '{"models":[{"id":"claude-opus-4-7"},{"id":"swe-2"}]}'\n"""
+        "else\n"
+        "  echo acp\n"
+        "fi\n"
+    )
     fake_cli.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -87,6 +99,7 @@ def test_register_surfaces_provider_in_model_picker(monkeypatch, tmp_path):
     rows = {row["slug"]: row for row in list_picker_providers()}
     assert rows["devin"]["name"] == "Devin CLI (SWE-2)"
     assert "swe-2" in rows["devin"]["models"]
+    assert "claude-opus-4-7" in rows["devin"]["models"]
 
 
 def test_fetch_models_returns_none():
@@ -94,6 +107,57 @@ def test_fetch_models_returns_none():
     from providers import get_provider_profile
 
     assert get_provider_profile("devin").fetch_models() is None
+
+
+def test_extract_model_ids_handles_flat_and_family_shapes():
+    provider_mod = _load_provider_module()
+    payload = {
+        "flat": ["swe-2", " opus ", "swe-2"],
+        "models": [
+            {"id": "claude-opus-4-7", "aliases": ["opus", "claude-opus-4-7"]},
+            {"model": "gpt-5", "shortName": "gpt"},
+        ],
+        "families": [{
+            "name": "Claude",
+            "models": [{"id": "sonnet", "short_name": ["sonnet", "claude-sonnet-4"]}],
+        }],
+    }
+    model_ids = provider_mod._extract_model_ids(payload)
+    assert model_ids == [
+        "swe-2", "opus", "claude-opus-4-7", "gpt-5", "gpt", "sonnet", "claude-sonnet-4",
+    ]
+    assert "Claude" not in model_ids
+
+
+def test_fetch_cli_models_merges_live_after_curated(monkeypatch, tmp_path):
+    provider_mod = _load_provider_module()
+    fake_cli = tmp_path / "devin"
+    fake_cli.write_text(
+        """#!/bin/sh
+printf '%s\n' '{"models":[{"id":"claude-opus-4-7"},{"id":"swe-2"}]}'
+"""
+    )
+    fake_cli.chmod(0o755)
+    monkeypatch.setenv("HERMES_DEVIN_ACP_COMMAND", str(fake_cli))
+    models = provider_mod.fetch_cli_models("devin", False)
+    assert models[:len(provider_mod.FALLBACK_MODELS)] == list(provider_mod.FALLBACK_MODELS)
+    assert models[-1] == "claude-opus-4-7"
+    assert models.count("swe-2") == 1
+
+
+def test_fetch_cli_models_returns_none_on_failure(monkeypatch, tmp_path):
+    provider_mod = _load_provider_module()
+    failed_cli = tmp_path / "failed-devin"
+    failed_cli.write_text("#!/bin/sh\nexit 1\n")
+    failed_cli.chmod(0o755)
+    monkeypatch.setenv("HERMES_DEVIN_ACP_COMMAND", str(failed_cli))
+    assert provider_mod.fetch_cli_models("devin", False) is None
+
+    garbage_cli = tmp_path / "garbage-devin"
+    garbage_cli.write_text("#!/bin/sh\necho not-json\n")
+    garbage_cli.chmod(0o755)
+    monkeypatch.setenv("HERMES_DEVIN_ACP_COMMAND", str(garbage_cli))
+    assert provider_mod.fetch_cli_models("devin", False) is None
 
 
 def test_authenticate_request_prefers_key_or_token_method():

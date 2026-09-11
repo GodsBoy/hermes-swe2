@@ -6,7 +6,9 @@ over stdio (`devin acp`), so the profile supplies its own client via
 ``copilot-acp`` provider uses.
 """
 
+import json
 import logging
+import subprocess
 from typing import Any
 
 from providers import register_provider
@@ -23,6 +25,11 @@ FALLBACK_MODELS = (
     "swe-1-7",
     "swe-1-7-lightning",
     "swe-1-6-fast",
+    "opus",
+    "sonnet",
+    "gpt",
+    "codex",
+    "gemini",
 )
 
 
@@ -46,17 +53,96 @@ class DevinACPProfile(ProviderProfile):
         return None
 
 
+def _extract_model_ids(payload: object) -> list[str]:
+    """Extract model ids from flat and family-grouped CLI catalog responses."""
+    model_ids: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        model_id = value.strip()
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            model_ids.append(model_id)
+
+    def walk(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    add(item)
+                else:
+                    walk(item)
+            return
+        if not isinstance(value, dict):
+            return
+        has_nested_list = any(isinstance(item, list) for item in value.values())
+        for key in ("id", "model", "name"):
+            item = value.get(key)
+            if isinstance(item, str) and (key != "name" or not has_nested_list):
+                add(item)
+                break
+        for key in ("aliases", "shortName", "short_name"):
+            item = value.get(key)
+            if isinstance(item, str):
+                add(item)
+            elif isinstance(item, list):
+                for alias in item:
+                    if isinstance(alias, str):
+                        add(alias)
+        for item in value.values():
+            if isinstance(item, (dict, list)):
+                walk(item)
+
+    walk(payload)
+    return model_ids
+
+
+def fetch_cli_models(normalized: str, force_refresh: bool) -> list[str] | None:
+    """Fetch and merge the account model catalog exposed by the Devin CLI."""
+    try:
+        try:
+            from .devin_acp_client import _build_subprocess_env, _resolve_command
+        except ImportError:
+            from devin_acp_client import (  # type: ignore[no-redef]
+                _build_subprocess_env,
+                _resolve_command,
+            )
+
+        result = subprocess.run(
+            [_resolve_command(), "models", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=_build_subprocess_env(None, []),
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.debug("Devin CLI model catalog exited with status %s", result.returncode)
+            return None
+        live_models = _extract_model_ids(json.loads(result.stdout))
+        if not live_models:
+            logger.debug("Devin CLI model catalog returned no model ids")
+            return None
+        merged = list(FALLBACK_MODELS)
+        merged.extend(model_id for model_id in live_models if model_id not in merged)
+        return merged
+    except Exception as exc:
+        logger.debug("Devin CLI model catalog fetch failed: %s", exc)
+        return None
+
+
 def register_picker_entries() -> None:
     """Surface the provider in ``/model`` and ``hermes model``.
 
     Hermes builds its picker from ``HERMES_OVERLAYS`` (credential check through
     ``get_auth_status``, which for external process providers means the CLI
-    resolves on PATH) and takes model names from the static catalog, so both
-    are extended here. External process plugin profiles are otherwise skipped
-    by the picker on purpose. Best effort: any Hermes internals mismatch only
-    disables the menu entry, the provider itself still resolves by name.
+    resolves on PATH), takes model names from the static catalog, and supports
+    a live catalog fetcher. External process plugin profiles are otherwise
+    skipped by the picker on purpose. Best effort: any Hermes internals
+    mismatch only disables the menu entry, the provider itself still resolves
+    by name.
     """
     try:
+        from hermes_cli.models import _PROVIDER_CATALOG_FETCHERS
         from hermes_cli.models_catalog_static import _PROVIDER_MODELS
         from hermes_cli.providers import (
             _LABEL_OVERRIDES,
@@ -72,6 +158,7 @@ def register_picker_entries() -> None:
     )
     _LABEL_OVERRIDES.setdefault(PROVIDER_NAME, DISPLAY_NAME)
     _PROVIDER_MODELS.setdefault(PROVIDER_NAME, list(FALLBACK_MODELS))
+    _PROVIDER_CATALOG_FETCHERS.setdefault(PROVIDER_NAME, fetch_cli_models)
 
 
 def register() -> None:

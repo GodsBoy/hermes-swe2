@@ -29,7 +29,7 @@ Cognition's **SWE-2** is one of the strongest software engineering models availa
 ## ✨ Features
 
 * 🔌 **Drop in provider:** registers as `devin`; `--provider devin`, `hermes model`, `hermes setup`, and `hermes doctor` pick it up automatically
-* 🧬 **SWE family picker:** `swe-2`, `swe`, `swe-1-7`, `swe-1-7-lightning`, and `swe-1-6-fast` are available as fallbacks. Live `availableModels` and `configOptions` are negotiated over ACP when offered
+* 🧬 **SWE and frontier model picker:** the picker lists the SWE models plus the frontier families `opus`, `sonnet`, `gpt`, `codex`, and `gemini`. When the CLI is installed, the live list from `devin models list --format json` is merged in and cached by Hermes
 * 🛠️ **Full tool calling:** Hermes tool schemas cross the bridge as `<tool_call>` blocks, while Hermes continues to execute the tools
 * 🌊 **Streaming:** `session/update` chunks map back to OpenAI stream chunks
 * 🔒 **Fail closed:** permission prompts are denied, and `fs/*` requests are confined to the session working directory
@@ -148,7 +148,7 @@ In a chat, send `/model`, pick **Devin CLI (SWE-2)** from the provider menu, the
 | `DEVIN_MODEL` | set per request | Set automatically to the selected Hermes model unless `HERMES_DEVIN_ACP_ARGS` already contains `--model` |
 | `DEVIN_API_KEY` / `WINDSURF_API_KEY` | Not set | Credential handed to the child and offered through ACP `authenticate` |
 
-Model ids are Devin CLI short names such as `swe-2`, `swe`, `opus`, `sonnet`, `codex`, and `gemini`. They resolve on the server to the latest family member. Unlisted or policy disabled ids fall back to the session default with a warning in `agent.log`.
+Model ids include the curated SWE models and frontier families such as `opus`, `sonnet`, `gpt`, `codex`, and `gemini`. When available, Hermes merges the account catalog from `devin models list --format json` into the picker and caches it. Refresh the catalog with `hermes model --refresh`. Unlisted or policy disabled ids fall back to the session default with a warning in `agent.log`.
 
 ## 🔍 Troubleshooting
 
