@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-swe2"
+version = "1.0.0"
+description = "Hermes Agent model-provider plugin: Cognition Devin CLI (SWE-2) via `devin acp`"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.entry-points."hermes_agent.plugins"]
+devin = "devin_provider:register"
+
+[tool.setuptools]
+py-modules = ["devin_provider", "devin_acp_client"]
