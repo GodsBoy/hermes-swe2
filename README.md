@@ -148,7 +148,7 @@ In a chat, send `/model`, pick **Devin CLI (SWE-2)** from the provider menu, the
 | `DEVIN_MODEL` | set per request | Set automatically to the selected Hermes model unless `HERMES_DEVIN_ACP_ARGS` already contains `--model` |
 | `DEVIN_API_KEY` / `WINDSURF_API_KEY` | Not set | Credential handed to the child and offered through ACP `authenticate` |
 
-Model ids include the curated SWE models and frontier families such as `opus`, `sonnet`, `gpt`, `codex`, and `gemini`. When available, Hermes merges the account catalog from `devin models list --format json` into the picker and caches it. Refresh the catalog with `hermes model --refresh`. Unlisted or policy disabled ids fall back to the session default with a warning in `agent.log`.
+Model ids include the curated SWE models and frontier families such as `opus`, `sonnet`, `gpt`, `codex`, and `gemini`. When available, Hermes merges the account catalog from `devin models list --format json` into the picker and caches it. Refresh the cached catalog with `/model --refresh` in a chat. Unlisted or policy disabled ids fall back to the session default with a warning in `agent.log`.
 
 ## 🔍 Troubleshooting
 
