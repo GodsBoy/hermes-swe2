@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ from agent.file_safety import (
     get_write_denied_error,
     is_write_approval_required,
 )
+from agent.reasoning_effort import EFFORT_LADDER
 from agent.redact import redact_sensitive_text
 from tools.environments.local import hermes_subprocess_env
 
@@ -57,13 +59,13 @@ _DEFAULT_TIMEOUT_SECONDS = 900.0
 # schemas (SWE-2 family: 262k tokens total). The transcript is trimmed to this
 # budget, oldest turns first, leaving headroom for that server-side overhead.
 _DEFAULT_PROMPT_TOKEN_BUDGET = 150_000
+_MIN_TRANSCRIPT_TOKENS = 1_000
 _CHARS_PER_TOKEN = 4
 _OMISSION_NOTE = "[... {count} earlier transcript message(s) omitted to fit the model context window ...]"
 _TRUNCATION_NOTE = "[... earlier content truncated to fit the model context window ...]\n"
-# Hermes' /reasoning ladder; Devin encodes the same idea as variant suffixes
-# (swe-2-medium/-high/-max, gpt-5.6-sol-none/-low/.../-max). The wire-side clamp
-# already folds ``ultra`` into ``max`` for chat-completions profiles.
-_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+# Devin encodes Hermes' /reasoning ladder (EFFORT_LADDER, imported above) as variant
+# suffixes (swe-2-medium/-high/-max, gpt-5.6-sol-none/-low/.../-max). The wire-side
+# clamp already folds ``ultra`` into ``max`` for chat-completions profiles.
 _VARIANT_DECORATORS = ("fast", "priority")
 # Catalog aliases to family prefixes (from `devin models list`); exact variant ids
 # need no entry. Unknown aliases fall through to suffix-stripping unchanged.
@@ -212,13 +214,26 @@ def _enabled_ids(entries: Any, key: str) -> set[str]:
             if isinstance(e, dict) and not _is_disabled(e)}
 
 
+def _model_config_option(session: dict[str, Any]) -> dict[str, Any] | None:
+    """The session's ``model`` config option, if advertised."""
+    return next(
+        (o for o in (session.get("configOptions") or [])
+         if isinstance(o, dict) and "model" in (o.get("category"), o.get("id"))),
+        None,
+    )
+
+
+def _available_model_ids(session: dict[str, Any]) -> set[str]:
+    """Legacy ``models.availableModels`` list (pre-configOptions ACP servers)."""
+    return _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
+
+
 def _advertised_model_values(session: dict[str, Any]) -> set[str]:
     """The model ids the session lets us select: the ``model`` config option's values,
     else the legacy ``models.availableModels`` list."""
-    for option in session.get("configOptions") or []:
-        if isinstance(option, dict) and "model" in (option.get("category"), option.get("id")):
-            return _enabled_ids(option.get("options"), "value")
-    return _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
+    if (option := _model_config_option(session)) is not None:
+        return _enabled_ids(option.get("options"), "value")
+    return _available_model_ids(session)
 
 
 def _family_base(model_id: str) -> str:
@@ -228,9 +243,9 @@ def _family_base(model_id: str) -> str:
     churn = True
     while churn:
         churn = False
-        for suffix in (*_EFFORT_ORDER, *_VARIANT_DECORATORS):
+        for suffix in (*EFFORT_LADDER, *_VARIANT_DECORATORS):
             if base.endswith(f"-{suffix}"):
-                base = base[: -(len(suffix) + 1)]
+                base = base.removesuffix(f"-{suffix}")
                 churn = True
                 break
     return base
@@ -242,7 +257,7 @@ def _effort_variant(model_id: str, effort: str, advertised: set[str]) -> str | N
     then the family's lowest advertised tier. A bare family id counts as its top
     tier (``swe-1-7`` is "SWE-1.7 Max"). Returns None when nothing maps."""
     effort = str(effort or "").strip().lower()
-    if effort not in _EFFORT_ORDER or not advertised:
+    if effort not in EFFORT_LADDER or not advertised:
         return None
     base = _FAMILY_ALIASES.get(model_id.strip().lower()) or _family_base(model_id)
     tiers: dict[str, str] = {}
@@ -251,20 +266,20 @@ def _effort_variant(model_id: str, effort: str, advertised: set[str]) -> str | N
             candidate, is_decorated = value, False
             for decorator in _VARIANT_DECORATORS:
                 if candidate.endswith(f"-{decorator}"):
-                    candidate = candidate[: -(len(decorator) + 1)]
+                    candidate = candidate.removesuffix(f"-{decorator}")
                     is_decorated = True
             if is_decorated and not decorated_ok:
                 continue
             if candidate == base:
                 tiers.setdefault("max", value)
-            elif candidate.startswith(f"{base}-") and candidate[len(base) + 1:] in _EFFORT_ORDER:
+            elif candidate.startswith(f"{base}-") and candidate[len(base) + 1:] in EFFORT_LADDER:
                 tiers.setdefault(candidate[len(base) + 1:], value)
     if not tiers:
         return None
-    for tier in reversed(_EFFORT_ORDER[: _EFFORT_ORDER.index(effort) + 1]):
+    for tier in reversed(EFFORT_LADDER[: EFFORT_LADDER.index(effort) + 1]):
         if tier in tiers:
             return tiers[tier]
-    return next((tiers[tier] for tier in _EFFORT_ORDER if tier in tiers), None)
+    return next((tiers[tier] for tier in EFFORT_LADDER if tier in tiers), None)
 
 
 def _model_selection_request(session: dict[str, Any], requested_model: str) -> tuple[str, dict[str, Any]] | None:
@@ -276,17 +291,15 @@ def _model_selection_request(session: dict[str, Any], requested_model: str) -> t
     requested_model = str(requested_model or "").strip()
     if not session_id or not requested_model or requested_model == "devin":
         return None
-    options = [o for o in (session.get("configOptions") or [])
-               if isinstance(o, dict) and "model" in (o.get("category"), o.get("id"))]
-    if options:
-        if requested_model not in _enabled_ids(options[0].get("options"), "value"):
+    if (model_option := _model_config_option(session)) is not None:
+        if requested_model not in _enabled_ids(model_option.get("options"), "value"):
             return None
         return "session/set_config_option", {
             "sessionId": session_id,
-            "configId": str(options[0].get("id") or "model"),
+            "configId": str(model_option.get("id") or "model"),
             "value": requested_model,
         }
-    available = _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
+    available = _available_model_ids(session)
     if not available or requested_model not in available:
         return None
     return "session/set_model", {"sessionId": session_id, "modelId": requested_model}
@@ -316,7 +329,7 @@ def _estimate_tokens(text: str) -> int:
 def _prompt_token_budget() -> int:
     raw = os.getenv("HERMES_DEVIN_PROMPT_TOKENS", "").strip()
     try:
-        return max(1_000, int(raw)) if raw else _DEFAULT_PROMPT_TOKEN_BUDGET
+        return max(_MIN_TRANSCRIPT_TOKENS, int(raw)) if raw else _DEFAULT_PROMPT_TOKEN_BUDGET
     except ValueError:
         return _DEFAULT_PROMPT_TOKEN_BUDGET
 
@@ -356,15 +369,25 @@ def _format_messages_as_prompt(
     messages: list[dict[str, Any]], model: str | None = None, tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
 ) -> str:
+    return _format_turns_as_prompt(
+        _render_transcript_turns(messages), model=model, tools=tools, tool_choice=tool_choice
+    )
+
+
+def _format_turns_as_prompt(
+    turns: list[str], model: str | None = None, tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
+) -> str:
     # Deliberately no "requested model" line: the model is applied for real via ACP
     # session/set_model; a prompt-text mention makes a substituted backend model falsely
     # self-identify as the requested one.
     sections: list[str] = [*_PROMPT_PREAMBLE, *_render_tool_bridge_sections(tools, tool_choice)]
-    transcript = _render_transcript_turns(messages)
     closing = "Continue the conversation from the latest user request."
-    if transcript:
+    if turns:
         fixed_cost = _estimate_tokens("\n\n".join(sections)) + _estimate_tokens(closing)
-        fitted = _fit_transcript_turns(transcript, max(1_000, _prompt_token_budget() - fixed_cost))
+        fitted = _fit_transcript_turns(
+            turns, max(_MIN_TRANSCRIPT_TOKENS, _prompt_token_budget() - fixed_cost)
+        )
         sections.append("Conversation transcript:\n\n" + "\n\n".join(fitted))
     sections.append(closing)
     return "\n\n".join(section.strip() for section in sections if section and section.strip())
@@ -377,7 +400,9 @@ def _format_delta_prompt(turns: list[str]) -> str:
 
 
 def _turn_hash(turn: str) -> str:
-    return hashlib.sha1(turn.encode("utf-8")).hexdigest()
+    # Dedup/divergence fingerprint only, never security: opt out so FIPS-mode
+    # interpreters don't refuse the algorithm.
+    return hashlib.sha1(turn.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _render_message_content(content: Any) -> str:
@@ -471,14 +496,17 @@ class DevinACPClient:
         # rewrote history), at which point the next call respawns and replays.
         self._call_lock = threading.Lock()
         self._session: dict[str, Any] = {}
-        self._session_id = ""
         self._sent_hashes: list[str] = []
         self._applied_model = ""
         self._inbox: queue.Queue[dict[str, Any]] = queue.Queue()
         self._stderr_tail: deque[str] = deque(maxlen=40)
-        self._request_ids = iter(range(1, 1 << 62))
+        self._request_ids = itertools.count(1)
         self._last_active = 0.0
         self._watchdog_started = False
+
+    @property
+    def _session_id(self) -> str:
+        return str(self._session.get("sessionId") or "").strip()
 
     def _teardown(self) -> None:
         """Kill the child and forget the session; the client itself stays usable."""
@@ -491,12 +519,15 @@ class DevinACPClient:
         except Exception:
             with contextlib.suppress(Exception):
                 proc.kill()
-        self._session, self._session_id = {}, ""
+        self._session = {}
         self._sent_hashes, self._applied_model = [], ""
+        self._last_active = 0.0
 
     def close(self) -> None:
         self._teardown()
         self.is_closed = True
+        # Let a resurrected client (_spawn resets is_closed) start a fresh watchdog.
+        self._watchdog_started = False
 
     def _create_chat_completion(
         self, *, model: str | None = None, messages: list[dict[str, Any]] | None = None,
@@ -579,7 +610,8 @@ class DevinACPClient:
         def _watch() -> None:
             while not self.is_closed:
                 if (
-                    self._live_process() is not None
+                    not self._call_lock.locked()  # never reap a child mid-call
+                    and self._live_process() is not None
                     and self._last_active
                     and time.monotonic() - self._last_active > _SESSION_IDLE_TTL_SECONDS
                 ):
@@ -592,8 +624,9 @@ class DevinACPClient:
     def _handshake(self, requested_model: str, timeout_seconds: float) -> dict[str, Any]:
         """Spawn the child, run initialize/authenticate/session/new, remember the session."""
         proc = self._spawn(requested_model)
-        self._inbox = queue.Queue()
-        self._stderr_tail = deque(maxlen=40)
+        inbox: queue.Queue[dict[str, Any]] = queue.Queue()
+        stderr_tail: deque[str] = deque(maxlen=40)
+        self._inbox, self._stderr_tail = inbox, stderr_tail
 
         def _decode(line: str) -> dict[str, Any]:
             try:
@@ -605,8 +638,10 @@ class DevinACPClient:
             for line in stream or ():
                 sink(line)
 
-        threading.Thread(target=_pump, args=(proc.stdout, lambda line: self._inbox.put(_decode(line))), daemon=True).start()
-        threading.Thread(target=_pump, args=(proc.stderr, lambda line: self._stderr_tail.append(line.rstrip("\n"))), daemon=True).start()
+        # The sinks are bound now, not via self: a pump still draining a killed
+        # process must not write into the next session's inbox.
+        threading.Thread(target=_pump, args=(proc.stdout, lambda line: inbox.put(_decode(line))), daemon=True).start()
+        threading.Thread(target=_pump, args=(proc.stderr, lambda line: stderr_tail.append(line.rstrip("\n"))), daemon=True).start()
         init_result = self._request("initialize", _INITIALIZE_PARAMS, timeout_seconds) or {}
         if auth_params := _authenticate_request(init_result, _resolve_devin_key()):
             try:
@@ -614,10 +649,9 @@ class DevinACPClient:
             except Exception as exc:
                 logger.debug("Devin ACP authenticate request failed; relying on stored CLI credentials: %s", exc)
         session = self._request("session/new", {"cwd": self._acp_cwd, "mcpServers": []}, timeout_seconds) or {}
-        session_id = str(session.get("sessionId") or "").strip()
-        if not session_id:
+        if not str(session.get("sessionId") or "").strip():
             raise RuntimeError("Devin ACP did not return a sessionId.")
-        self._session, self._session_id = session, session_id
+        self._session = session
         self._ensure_watchdog()
         return session
 
@@ -675,21 +709,23 @@ class DevinACPClient:
         variant pick and already encodes its tier, so it wins over the effort
         setting; only family slugs/aliases get remapped."""
         selected_model = str(requested_model or "").strip()
-        if not selected_model or selected_model == "devin" or selected_model == self._applied_model:
+        if not selected_model or selected_model == "devin":
             return
         advertised = _advertised_model_values(session)
         if (effort := self._reasoning_effort(reasoning_config)) and selected_model not in advertised:
-            if (remapped := _effort_variant(selected_model, effort, advertised)) and remapped != selected_model:
-                logger.info("Devin ACP reasoning effort %r maps model %r -> %r", effort, selected_model, remapped)
+            if remapped := _effort_variant(selected_model, effort, advertised):
                 selected_model = remapped
+        if selected_model == self._applied_model:
+            return
         try:
             if (selection := _model_selection_request(session, selected_model)) is not None:
+                if selected_model != str(requested_model or "").strip():
+                    logger.info(
+                        "Devin ACP reasoning effort %r maps model %r -> %r",
+                        self._reasoning_effort(reasoning_config), requested_model, selected_model,
+                    )
                 self._request(selection[0], selection[1], timeout_seconds)
-                self._applied_model = selected_model
-            elif not any(
-                isinstance(option, dict) and "model" in (option.get("category"), option.get("id"))
-                for option in (session.get("configOptions") or [])
-            ) and not (session.get("models") or {}).get("availableModels"):
+            elif _model_config_option(session) is None and not _available_model_ids(session):
                 logger.debug(
                     "Devin ACP did not advertise model options; DEVIN_MODEL=%r was applied.",
                     requested_model,
@@ -700,6 +736,9 @@ class DevinACPClient:
                     "the CLI-level model (DEVIN_MODEL/--model) resolved at spawn.",
                     selected_model,
                 )
+            # Whatever the outcome, this model is resolved for this session: don't
+            # re-validate and re-warn on every call.
+            self._applied_model = selected_model
         except Exception as exc:
             logger.warning("Devin ACP model selection for %r failed; continuing with the session default: %s", selected_model, exc)
 
@@ -710,6 +749,9 @@ class DevinACPClient:
     ) -> tuple[str, str, str]:
         requested_model = str(model or "").strip()
         with self._call_lock:
+            # Activity stamp up front too: the watchdog only reaps an idle session,
+            # and an in-flight turn is never idle.
+            self._last_active = time.monotonic()
             turns = _render_transcript_turns(messages)
             hashes = [_turn_hash(turn) for turn in turns]
             session_usable = (
@@ -717,8 +759,6 @@ class DevinACPClient:
                 and self._session_id
                 and self._sent_hashes == hashes[: len(self._sent_hashes)]
             )
-            if session_usable and time.monotonic() - self._last_active > _SESSION_IDLE_TTL_SECONDS:
-                session_usable = False
             if session_usable:
                 delta = turns[len(self._sent_hashes):]
                 prompt_text = _format_delta_prompt(delta) if delta else "Continue the conversation."
@@ -736,8 +776,8 @@ class DevinACPClient:
             try:
                 session = self._handshake(requested_model, timeout_seconds)
                 self._apply_model_selection(session, requested_model, reasoning_config, timeout_seconds)
-                prompt_text = _format_messages_as_prompt(
-                    messages, model=model, tools=tools, tool_choice=tool_choice
+                prompt_text = _format_turns_as_prompt(
+                    turns, model=model, tools=tools, tool_choice=tool_choice
                 )
                 result = self._send_prompt(prompt_text, timeout_seconds)
             except Exception:

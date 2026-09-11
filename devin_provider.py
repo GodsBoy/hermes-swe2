@@ -125,6 +125,7 @@ def fetch_cli_models(normalized: str, force_refresh: bool) -> list[str] | None:
             timeout=15,
             env=_build_subprocess_env(None, []),
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             logger.debug("Devin CLI model catalog exited with status %s", result.returncode)
