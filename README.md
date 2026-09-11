@@ -117,6 +117,8 @@ hermes --provider devin --model swe-2
 hermes doctor                     # confirms the `devin` binary resolves
 ```
 
+In a chat, send `/model`, pick **Devin CLI (SWE-2)** from the provider menu, then choose a model. The provider appears in the menu as soon as the `devin` binary resolves on the PATH of the process running Hermes.
+
 ## ⚙️ Configuration
 
 | Env var | Default | Purpose |
@@ -169,7 +171,7 @@ This plugin deliberately uses the **documented** `devin acp` interface, the same
 
 ```bash
 HERMES_REPO=/path/to/hermes-agent \
-  uv run --with openai --with pytest --with pyyaml --with httpx \
+  uv run --with openai --with pytest --with pyyaml --with httpx --with requests \
   python -m pytest tests/ -q
 ```
 

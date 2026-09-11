@@ -19,7 +19,7 @@ Issues and pull requests are welcome.
 
   ```bash
   HERMES_REPO=/path/to/hermes-agent \
-    uv run --with openai --with pytest --with pyyaml --with httpx \
+    uv run --with openai --with pytest --with pyyaml --with httpx --with requests \
     python -m pytest tests/ -q
   ```
 - **Lint:** `ruff check .` should stay clean (see `[tool.ruff]` in

@@ -65,6 +65,30 @@ def test_register_adds_devin_profile():
         assert get_provider_profile(alias) is profile
 
 
+def test_register_surfaces_provider_in_model_picker(monkeypatch, tmp_path):
+    _load_plugin_module()
+    from hermes_cli.models_catalog_static import _PROVIDER_MODELS
+    from hermes_cli.providers import _LABEL_OVERRIDES, HERMES_OVERLAYS, get_label
+
+    assert HERMES_OVERLAYS["devin"].auth_type == "external_process"
+    assert _LABEL_OVERRIDES["devin"] == "Devin CLI (SWE-2)"
+    assert get_label("devin") == "Devin CLI (SWE-2)"
+    assert _PROVIDER_MODELS["devin"][0] == "swe-2"
+
+    pytest.importorskip("requests", reason="hermes model picker needs requests")
+    # The picker row appears once the CLI resolves on PATH, exactly like copilot-acp.
+    fake_cli = tmp_path / "devin"
+    fake_cli.write_text("#!/bin/sh\necho acp\n")
+    fake_cli.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    from hermes_cli.model_switch_providers import list_picker_providers
+
+    rows = {row["slug"]: row for row in list_picker_providers()}
+    assert rows["devin"]["name"] == "Devin CLI (SWE-2)"
+    assert "swe-2" in rows["devin"]["models"]
+
+
 def test_fetch_models_returns_none():
     _load_plugin_module()
     from providers import get_provider_profile
