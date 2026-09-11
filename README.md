@@ -73,7 +73,7 @@ The selected model is applied through the documented `DEVIN_MODEL` setting, with
 
 ```bash
 hermes plugins install https://github.com/GodsBoy/hermes-swe2
-# lands in $HERMES_HOME/plugins/hermes-swe2/
+# lands in $HERMES_HOME/plugins/devin/ (the plugin name comes from plugin.yaml)
 # the model provider manifest routes it to the provider registry automatically
 ```
 
@@ -100,6 +100,25 @@ pip install git+https://github.com/GodsBoy/hermes-swe2.git
 
 </details>
 
+### Update
+
+```bash
+hermes plugins update devin           # git pull on the installed checkout, then rescan
+# pinned to a commit with --ref? reinstall instead:
+hermes plugins install https://github.com/GodsBoy/hermes-swe2 --force
+pip install --upgrade git+https://github.com/GodsBoy/hermes-swe2.git   # pip installs
+```
+
+### Restart after install or update
+
+Hermes discovers model provider plugins once, when a process starts. A gateway that is already running keeps its old provider list, so `/model` will not show **Devin CLI (SWE-2)** until you restart it:
+
+```bash
+hermes gateway restart
+```
+
+The interactive CLI and TUI pick the plugin up on their next launch. Both also need the `devin` binary on the PATH of the process that runs Hermes; a gateway started by systemd or launchd may have a narrower PATH than your shell, so set `DEVIN_CLI_PATH` to the full binary path if the provider does not appear.
+
 ### Prerequisites
 
 Install the Devin CLI by following the [official installation guide](https://docs.devin.ai/cli), then authenticate once:
@@ -117,7 +136,7 @@ hermes --provider devin --model swe-2
 hermes doctor                     # confirms the `devin` binary resolves
 ```
 
-In a chat, send `/model`, pick **Devin CLI (SWE-2)** from the provider menu, then choose a model. The provider appears in the menu as soon as the `devin` binary resolves on the PATH of the process running Hermes.
+In a chat, send `/model`, pick **Devin CLI (SWE-2)** from the provider menu, then choose a model. The provider appears in the menu as soon as the `devin` binary resolves on the PATH of the process running Hermes (see "Restart after install or update").
 
 ## ⚙️ Configuration
 
