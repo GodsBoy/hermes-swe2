@@ -185,6 +185,11 @@ Fully offline — covers registration, the prompt/tool bridge, ACP model-selecti
 └── assets/              # banner & friends
 ```
 
+## 👤 Credits
+
+Built by **[GodsBoy](https://github.com/GodsBoy)**. If you use or adapt this plugin,
+attribution is appreciated — a link back to this repo is plenty.
+
 ## 🤝 Contributing
 
 Issues and PRs welcome. Hermes-side conventions live in
@@ -195,6 +200,6 @@ this is intentionally an **out-of-tree** plugin (their policy for vendor integra
 
 <div align="center">
 
-Built for 🪽 [Hermes Agent](https://hermes-agent.nousresearch.com) · Powered by ⚡ [SWE-2](https://cognition.com/blog/swe-2) · MIT Licensed
+Built for 🪽 [Hermes Agent](https://hermes-agent.nousresearch.com) · Powered by ⚡ [SWE-2](https://cognition.com/blog/swe-2) · MIT Licensed · © 2026 GodsBoy
 
 </div>
